@@ -1,0 +1,1 @@
+cargo build --target=wasm32-wasi --release && lunatic target/wasm32-wasi/release/mqtt_broker.wasm
