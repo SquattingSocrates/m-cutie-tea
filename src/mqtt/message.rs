@@ -1,28 +1,33 @@
-use serde::{Serialize, Deserialize};
 use super::flags::ControlPacketType;
+use serde::{Deserialize, Serialize};
 
 pub type MessageID = u32;
 pub type QoS = u8;
 pub type Blob = String;
 
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub enum PublishSource {
+    Client,
+    Server,
+}
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct FixedHeader {
     pub control_packet: ControlPacketType,
     pub length: u32,
     pub dup: bool,
     pub qos: u8,
-    pub retain: bool
+    pub retain: bool,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ConnectFlags {
     pub user_name: bool,
     pub password: bool,
     pub will_retain: bool,
     pub will_qos: u8,
     pub will: bool,
-    pub clean_session: bool
+    pub clean_session: bool,
 }
 
 impl ConnectFlags {
@@ -38,40 +43,44 @@ impl ConnectFlags {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ConnectVariableHeader {
     pub protocol_name: String,
     pub protocol_version: u32,
     pub connect_flags: ConnectFlags,
-    pub keep_alive: u32
+    pub keep_alive: u32,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct PublishVariableHeader {
     pub topic_name: String,
-    pub message_id: u32
+    pub message_id: u32,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct MessageIDVariableHeader {
-    pub message_id: u32
+    pub message_id: u32,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum VariableHeader {
     Empty,
     Connect(ConnectVariableHeader),
     Publish(PublishVariableHeader),
-    Subscribe(MessageIDVariableHeader)
+    Subscribe(MessageIDVariableHeader),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum MqttMessage {
     Connect(FixedHeader, ConnectVariableHeader, Vec<String>),
     Connack(FixedHeader, MessageIDVariableHeader),
-    Subscribe(FixedHeader, MessageIDVariableHeader, Vec<SubscriptionRequest>),
+    Subscribe(
+        FixedHeader,
+        MessageIDVariableHeader,
+        Vec<SubscriptionRequest>,
+    ),
     Suback(FixedHeader, MessageIDVariableHeader, Vec<QoS>),
-    Publish(FixedHeader, PublishVariableHeader, Blob),
+    Publish(FixedHeader, PublishVariableHeader, Blob, PublishSource),
     Puback(FixedHeader, MessageIDVariableHeader, MessageID),
     Pubrec(FixedHeader, MessageIDVariableHeader),
     Pubrel(FixedHeader, MessageIDVariableHeader),
@@ -81,15 +90,16 @@ pub enum MqttMessage {
     Pingreq(FixedHeader),
     Pingresp(FixedHeader),
     Disconnect(FixedHeader),
-    Unknown
+    Unknown,
 }
 
 type DualByteNum = Vec<u8>;
 type VariableNum = Vec<u8>;
 
+#[derive(Debug)]
 enum MessageTypeFlag {
     Standard(ControlPacketType),
-    Custom(u8)
+    Custom(u8),
 }
 
 impl MqttMessage {
@@ -104,48 +114,80 @@ impl MqttMessage {
                 MqttMessage::bytes_with_message_id(
                     MessageTypeFlag::Standard(flag),
                     variable.message_id,
-                    Some(payload.iter().map(|x| x.qos).collect())
+                    Some(payload.iter().map(|x| x.qos).collect()),
                 )
             }
-            MqttMessage::Publish(fixed, variable, _) => {
+            MqttMessage::Publish(fixed, variable, _, PublishSource::Client) => {
                 if fixed.qos == 0 {
-                    return Vec::new()
+                    return Vec::new();
                 }
-                let flag = if fixed.qos == 1 { ControlPacketType::PUBACK } else { ControlPacketType::PUBREC };
-                MqttMessage::bytes_with_message_id(MessageTypeFlag::Standard(flag), variable.message_id, None)
-            },
-            MqttMessage::Pubrec(_, variable) => {
-                MqttMessage::bytes_with_message_id(MessageTypeFlag::Custom(ControlPacketType::PUBREL.bits() << 4 | 0x2), variable.message_id, None)
+                let flag = if fixed.qos == 1 {
+                    ControlPacketType::PUBACK
+                } else {
+                    ControlPacketType::PUBREC
+                };
+                MqttMessage::bytes_with_message_id(
+                    MessageTypeFlag::Standard(flag),
+                    variable.message_id,
+                    None,
+                )
             }
-            MqttMessage::Pubrel(_, variable) => {
-                MqttMessage::bytes_with_message_id(MessageTypeFlag::Standard(ControlPacketType::PUBCOMP), variable.message_id, None)
+            MqttMessage::Publish(fixed, variable, payload, PublishSource::Server) => {
+                if fixed.qos == 0 {
+                    return Vec::new();
+                }
+                let flag = ControlPacketType::PUBLISH;
+                MqttMessage::bytes_with_message_id(
+                    MessageTypeFlag::Standard(flag),
+                    variable.message_id,
+                    Some(String::into_bytes(payload.to_string())),
+                )
             }
-            _ => Vec::new()
+            MqttMessage::Pubrec(_, variable) => MqttMessage::bytes_with_message_id(
+                MessageTypeFlag::Custom(ControlPacketType::PUBREL.bits() << 4 | 0x2),
+                variable.message_id,
+                None,
+            ),
+            MqttMessage::Pubrel(_, variable) => MqttMessage::bytes_with_message_id(
+                MessageTypeFlag::Standard(ControlPacketType::PUBCOMP),
+                variable.message_id,
+                None,
+            ),
+            _ => Vec::new(),
         }
     }
 
-    fn bytes_with_message_id(flag: MessageTypeFlag, message_id: u32, payload: Option<Vec<u8>>) -> Vec<u8> {
+    fn bytes_with_message_id(
+        flag: MessageTypeFlag,
+        message_id: u32,
+        payload: Option<Vec<u8>>,
+    ) -> Vec<u8> {
+        println!("Wrapping message {:?} {:?} {:?}", flag, message_id, payload);
         let flag = match flag {
             MessageTypeFlag::Custom(b) => b,
-            MessageTypeFlag::Standard(t) => t.bits() << 4   
+            MessageTypeFlag::Standard(t) => t.bits() << 4,
         };
         let mut message_id = MqttMessage::encode_multibyte_num(message_id);
         let mut payload = payload.unwrap_or(Vec::new());
-        let length = 5usize + message_id.len() + payload.len();
-        let mut v = Vec::<u8>::with_capacity(length);
-        let mut length = MqttMessage::encode_variable_num(length as u32);
+        let remaining_length = message_id.len() + payload.len();
+        let mut length = MqttMessage::encode_variable_num(remaining_length as u32);
+        println!(
+            "Remaining length {} {} {:?}",
+            message_id.len(),
+            payload.len(),
+            length
+        );
+        let mut v = Vec::<u8>::with_capacity(1 + length.len() + remaining_length);
         v.push(flag);
         v.append(&mut length);
         v.append(&mut message_id);
         v.append(&mut payload);
-        v        
+        v
     }
 
     fn encode_multibyte_num(message_id: u32) -> DualByteNum {
-        if message_id > 126 {
-            return vec![(message_id >> 8) as u8 | 0x80, message_id as u8]
-        }
-        vec![message_id as u8]
+        // println!("SPLITTING MESSAGE_ID {}", message_id, message_id >> 8, message_id as u8);
+        vec![(message_id >> 8) as u8, message_id as u8]
     }
 
     fn encode_variable_num(mut length: u32) -> VariableNum {
@@ -169,15 +211,14 @@ pub enum MqttPayload {
     Empty,
     Connect(Vec<String>),
     Publish(String),
-    Subscribe(Vec<SubscriptionRequest>)
+    Subscribe(Vec<SubscriptionRequest>),
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct SubscriptionRequest {
     pub topic: String,
-    pub qos: u8
+    pub qos: u8,
 }
-
 
 // Tests
 

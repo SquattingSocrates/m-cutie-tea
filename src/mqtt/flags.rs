@@ -1,6 +1,8 @@
 use bitflags::bitflags;
+use serde::{Deserialize, Serialize};
 
 bitflags! {
+    #[derive(Serialize, Deserialize)]
     pub struct ControlPacketType: u8 {
         const RESERVED = 0b00000000;
         const CONNECT = 0b00000001;
@@ -19,4 +21,4 @@ bitflags! {
         const DISCONNECT = 0b00001110;
         const AUTH = 0b00001111;
     }
-}    
+}

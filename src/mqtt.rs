@@ -1,7 +1,6 @@
-pub mod message;
+pub mod connection;
 pub mod flags;
+pub mod message;
 pub mod parser;
 
-use message::*;
 use flags::*;
-use parser::*;
