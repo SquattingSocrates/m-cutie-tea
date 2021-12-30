@@ -12,11 +12,11 @@ pub enum QueueRequest {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum QueueResponse {
     Puback(String),
-    Suback(String),
+    Suback,
     Publish(String, String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Subscription {
     pub link: Tag,
     // topic: String,
@@ -30,4 +30,10 @@ pub struct QueueCtx {
     pub stream: net::TcpStream,
     pub mailbox: Mailbox<MqttMessage>,
     pub broker: Process<Request<QueueRequest, QueueResponse>>,
+}
+
+#[derive(Debug)]
+pub struct Queue {
+    pub name: String,
+    pub subscribers: Vec<Subscription>,
 }

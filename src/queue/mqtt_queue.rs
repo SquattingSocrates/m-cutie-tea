@@ -31,7 +31,8 @@ pub fn handle_mqtt_message(
                             ),
                         }
                     }
-                    MqttMessage::Publish(_, _, _, PublishSource::Server) => {
+                    MqttMessage::Publish(_, variable, payload, PublishSource::Server) => {
+                        println!("MqttMessage::Publish to client {:?} {}", variable, payload);
                         match stream.write(&MqttMessage::to_response(&mut data)) {
                             Ok(_) => println!("Wrote publish to client"),
                             Err(e) => eprintln!("Failed to write to stream {:?}", e),

@@ -229,14 +229,15 @@ mod tests {
     #[test]
     fn single_byte() {
         let res = MqttMessage::encode_multibyte_num(78);
-        assert_eq!(res[0], 0b01001110);
-        assert_eq!(res.len(), 1, "Should have length of 1");
+        assert_eq!(res[0], 0b0);
+        assert_eq!(res[1], 0b01001110);
+        assert_eq!(res.len(), 2, "Should have length of 2");
     }
 
     #[test]
     fn multi_byte() {
         let res = MqttMessage::encode_multibyte_num(7267);
-        assert_eq!(res[0], 0b0011100);
+        assert_eq!(res[0], 0b00011100);
         assert_eq!(res[1], 0b01100011);
     }
 }

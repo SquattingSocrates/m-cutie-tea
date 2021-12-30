@@ -1,1 +1,1 @@
-cargo build --target=wasm32-wasi --release && lunatic target/wasm32-wasi/release/mqtt_broker.wasm
+WASMTIME_BACKTRACE_DETAILS=1 RUST_LOG=lunatic=debug cargo run

@@ -39,10 +39,11 @@ impl ByteParser {
             return Ok(&self.buf[start..start + n]);
         }
         Err(format!(
-            "Trying to take {} out of bound. cursor: {} | buf.len: {}",
+            "Trying to take {} out of bound. cursor: {} | buf.len: {}. buf: {:?}",
             n,
             self.cursor,
-            self.buf.len()
+            self.buf.len(),
+            self.buf
         ))
     }
 
@@ -53,6 +54,18 @@ impl ByteParser {
     }
 
     fn parse_string(&mut self) -> Result<String, String> {
+        let str_size = self.get_str_size()?;
+        if self.cursor + str_size as usize > self.buf.len() {
+            return Err(format!("Trying to take more string than present in buffer, discarding as multi-message stream"));
+        }
+        let s = self.take(str_size as usize)?;
+        match String::from_utf8(Vec::from(s)) {
+            Ok(s) => return Ok(s),
+            Err(err) => Err(format!("Failed to parse string {}", err)),
+        }
+    }
+
+    fn parse_string_mandatory(&mut self) -> Result<String, String> {
         let str_size = self.get_str_size()?;
         let s = self.take(str_size as usize)?;
         match String::from_utf8(Vec::from(s)) {
@@ -110,7 +123,7 @@ impl ByteParser {
     }
 
     pub fn parse_variable_header_connect(&mut self) -> Result<ConnectVariableHeader, String> {
-        let protocol_name = self.parse_string()?;
+        let protocol_name = self.parse_string_mandatory()?;
         let protocol_version = self.take(1)?;
         let protocol_version = protocol_version[0] as u32;
         let connect_flags = self.take(1)?;
@@ -128,7 +141,7 @@ impl ByteParser {
         &mut self,
         qos: u8,
     ) -> Result<PublishVariableHeader, String> {
-        let topic_name = self.parse_string()?;
+        let topic_name = self.parse_string_mandatory()?;
         let message_id = if qos > 0 { self.get_str_size()? } else { 0 };
         Ok(PublishVariableHeader {
             topic_name,
@@ -152,7 +165,15 @@ impl ByteParser {
         let variable_header = self.parse_variable_header_connect()?;
         let mut payload = Vec::<String>::new();
         while self.cursor < self.buf.len() {
-            payload.push(self.parse_string()?);
+            match self.parse_string() {
+                Ok(topic) => {
+                    payload.push(topic);
+                }
+                Err(err) => {
+                    println!("{}", err);
+                    break;
+                }
+            }
         }
         return Ok(MqttMessage::Connect(fixed_header, variable_header, payload));
     }
@@ -185,9 +206,16 @@ impl ByteParser {
         let variable_header = self.parse_variable_header_subscribe(fixed_header.qos)?;
         let mut payload = Vec::<SubscriptionRequest>::new();
         while self.cursor < self.buf.len() {
-            let topic = self.parse_string()?;
-            let qos = self.next().unwrap_or(0);
-            payload.push(SubscriptionRequest { topic, qos });
+            match self.parse_string() {
+                Ok(topic) => {
+                    let qos = self.next().unwrap_or(0);
+                    payload.push(SubscriptionRequest { topic, qos });
+                }
+                Err(err) => {
+                    println!("{}", err);
+                    break;
+                }
+            }
         }
 
         return Ok(MqttMessage::Subscribe(

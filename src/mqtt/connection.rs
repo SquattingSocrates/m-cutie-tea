@@ -15,6 +15,7 @@ pub fn handle_tcp((client, mut stream): (Process<MqttMessage>, net::TcpStream), 
                 }
                 println!("RAW {:?}", vc);
                 let mut parser = ByteParser::new(vc);
+                // let mut cursor = 0usize;
                 match parser.parse_mqtt() {
                     Ok(msg) => {
                         client.send(msg);
