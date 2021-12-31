@@ -40,7 +40,6 @@ pub fn handle_mqtt_message(
                         continue;
                     }
                     MqttMessage::Subscribe(_, _, payload) => {
-                        // let
                         let _res = broker.request(QueueRequest::Subscribe(
                             process::this(&mailbox),
                             payload

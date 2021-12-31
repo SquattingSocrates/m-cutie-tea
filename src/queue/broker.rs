@@ -1,14 +1,14 @@
+use super::topic_tree::*;
 use crate::mqtt::{
     flags::ControlPacketType,
     message::{FixedHeader, MqttMessage, PublishSource, PublishVariableHeader},
 };
 use crate::queue::structure::*;
 use lunatic::{Mailbox, Message, Request, TransformMailbox};
-use std::collections::HashMap;
 
 pub fn broker_process(mailbox: Mailbox<Request<QueueRequest, QueueResponse>>) {
     let mailbox = mailbox.catch_link_panic();
-    let mut subs = HashMap::<String, Queue>::new();
+    let mut subs = TopicTree::new();
     loop {
         match mailbox.receive() {
             Message::Normal(message) => {
@@ -18,11 +18,7 @@ pub fn broker_process(mailbox: Mailbox<Request<QueueRequest, QueueResponse>>) {
                     QueueRequest::Disconnect => {}
                     QueueRequest::Publish(topic, data, message_id) => {
                         let (topic, data) = (topic.to_string(), data.to_string());
-                        let queue = subs.entry(topic.to_string()).or_insert(Queue {
-                            name: topic.clone(),
-                            subscribers: Vec::new(),
-                        });
-                        for sub in &queue.subscribers {
+                        for sub in &subs.ensure_topic_queue(topic.to_string()).subscribers {
                             sub.process.send(MqttMessage::Publish(
                                 FixedHeader {
                                     control_packet: ControlPacketType::PUBLISH,
@@ -43,15 +39,14 @@ pub fn broker_process(mailbox: Mailbox<Request<QueueRequest, QueueResponse>>) {
                     }
                     QueueRequest::Subscribe(process, topic) => {
                         for sub in topic {
-                            let queue = subs.entry(sub.topic.clone()).or_insert(Queue {
-                                name: sub.topic.clone(),
-                                subscribers: Vec::new(),
-                            });
-                            queue.subscribers.push(Subscription {
-                                qos: sub.qos,
-                                link: client.link(),
-                                process: process.clone(),
-                            })
+                            let queue = subs.add_subscription(
+                                sub.topic.clone(),
+                                Subscription {
+                                    qos: sub.qos,
+                                    link: client.link(),
+                                    process: process.clone(),
+                                },
+                            );
                         }
                         message.reply(QueueResponse::Suback)
                     }

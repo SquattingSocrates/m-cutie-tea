@@ -16,7 +16,7 @@ pub enum QueueResponse {
     Publish(String, String),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Subscription {
     pub link: Tag,
     // topic: String,
