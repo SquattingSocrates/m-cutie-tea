@@ -16,6 +16,17 @@ pub enum QueueResponse {
     Publish(String, String),
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub enum BrokerRequest {
+    GetQueues(String),
+    Disconnect,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub enum BrokerResponse {
+    MatchingQueues(Vec<Process<Request<QueueRequest, QueueResponse>>>),
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct Subscription {
     pub link: Tag,

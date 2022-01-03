@@ -18,7 +18,7 @@ pub fn broker_process(mailbox: Mailbox<Request<QueueRequest, QueueResponse>>) {
                     QueueRequest::Disconnect => {}
                     QueueRequest::Publish(topic, data, message_id) => {
                         let (topic, data) = (topic.to_string(), data.to_string());
-                        for sub in &subs.ensure_topic_queue(topic.to_string()).subscribers {
+                        for sub in &subs.get_subscribers(topic.to_string()) {
                             sub.process.send(MqttMessage::Publish(
                                 FixedHeader {
                                     control_packet: ControlPacketType::PUBLISH,
@@ -39,7 +39,7 @@ pub fn broker_process(mailbox: Mailbox<Request<QueueRequest, QueueResponse>>) {
                     }
                     QueueRequest::Subscribe(process, topic) => {
                         for sub in topic {
-                            let queue = subs.add_subscription(
+                            let _queue = subs.add_subscription(
                                 sub.topic.clone(),
                                 Subscription {
                                     qos: sub.qos,
