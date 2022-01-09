@@ -1,9 +1,12 @@
-use super::structure::*;
+use crate::queue::queue::new_queue;
+use crate::structure::*;
+use lunatic::process;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::mem;
 use std::rc::Rc;
 
+#[derive(Default)]
 pub struct TopicTree {
     queues: Vec<Queue>,
     wildcard_subscriptions: Vec<WildcardSubscription>,
@@ -68,13 +71,13 @@ impl State {
                 let state = c
                     .transitions
                     .entry(StateTransition::Not(b'/'))
-                    .or_insert(State::new_wrapped());
+                    .or_insert_with(State::new_wrapped);
                 // println!("\n\nSTATE POINTING TO &STATE -> {:?}\n\n", state);
                 state
                     .borrow_mut()
                     .transitions
-                    .insert(StateTransition::Not(b'/'), Rc::clone(&state));
-                let state = Rc::clone(&state);
+                    .insert(StateTransition::Not(b'/'), Rc::clone(state));
+                let state = Rc::clone(state);
                 mem::drop(c);
                 prev = curr;
                 curr = Rc::clone(&state);
@@ -88,11 +91,11 @@ impl State {
                 let state = c
                     .transitions
                     .entry(StateTransition::Any)
-                    .or_insert(State::new_wrapped());
+                    .or_insert_with(State::new_wrapped);
                 state
                     .borrow_mut()
                     .transitions
-                    .insert(StateTransition::Any, Rc::clone(&state));
+                    .insert(StateTransition::Any, Rc::clone(state));
                 state.borrow_mut().is_terminal = true;
                 let state = Rc::clone(state);
                 mem::drop(c);
@@ -167,54 +170,57 @@ impl TopicTree {
         }
     }
 
-    pub fn ensure_topic_queue(&mut self, topic: String) -> &mut Queue {
+    pub fn ensure_topic_queue(&mut self, topic: String) -> Queue {
         if let Some(found) = self.queues.iter().position(|q| q.name == topic) {
-            self.queues.get_mut(found).unwrap()
+            self.queues.get(found).unwrap().clone()
         } else {
             let queue = Queue {
-                name: topic,
-                subscribers: Vec::new(),
+                name: topic.clone(),
+                process: process::spawn_with(topic, new_queue).unwrap(),
             };
             self.queues.push(queue);
             let len = self.queues.len();
-            self.queues.get_mut(len - 1).unwrap()
+            self.queues.get(len - 1).unwrap().clone()
         }
     }
 
-    pub fn add_subscription(&mut self, topic_pattern: String, sub: Subscription) {
+    pub fn get_matched_queues(&mut self, topic_pattern: String, sub: Subscription) -> Vec<Queue> {
         if topic_pattern.contains(&['+', '#'][..]) {
-            return self.add_wildcard_subscription(topic_pattern, sub);
+            return self.match_wildcard_subscriptions(topic_pattern, sub);
         }
-        let queue = self.ensure_topic_queue(topic_pattern);
-        queue.subscribers.push(sub);
+        vec![self.ensure_topic_queue(topic_pattern)]
     }
 
-    pub fn get_subscribers(&self, topic: String) -> Vec<Subscription> {
-        self.queues
-            .iter()
-            .flat_map(|queue| {
-                if queue.name == topic {
-                    return queue.subscribers.clone();
-                }
-                self.wildcard_subscriptions
-                    .iter()
-                    .filter(|wildcard| {
-                        State::matches_topic(Rc::clone(&wildcard.matcher), topic.clone())
-                    })
-                    .map(|wildcard| wildcard.sub.clone())
-                    .collect::<Vec<Subscription>>()
-                // None
-            })
-            .collect()
-    }
+    // pub fn get_subscribers(&self, topic: String) -> Vec<Subscription> {
+    //     self.queues
+    //         .iter()
+    //         .flat_map(|queue| {
+    //             if queue.name == topic {
+    //                 return queue.subscribers.clone();
+    //             }
+    //             self.wildcard_subscriptions
+    //                 .iter()
+    //                 .filter(|wildcard| {
+    //                     State::matches_topic(Rc::clone(&wildcard.matcher), topic.clone())
+    //                 })
+    //                 .map(|wildcard| wildcard.sub.clone())
+    //                 .collect::<Vec<Subscription>>()
+    //             // None
+    //         })
+    //         .collect()
+    // }
 
-    pub fn add_wildcard_subscription(&mut self, topic_pattern: String, sub: Subscription) {
+    pub fn match_wildcard_subscriptions(
+        &mut self,
+        topic_pattern: String,
+        sub: Subscription,
+    ) -> Vec<Queue> {
         let wildcard = State::from_topic(topic_pattern);
         self.wildcard_subscriptions.push(WildcardSubscription {
             matcher: Rc::clone(&wildcard),
             sub: sub.clone(),
         });
-        let keys = self
+        let keys: Vec<String> = self
             .queues
             .iter()
             .filter_map(|q| {
@@ -224,11 +230,10 @@ impl TopicTree {
                     None
                 }
             })
-            .collect::<Vec<String>>();
-        for key in keys {
-            let queue = self.ensure_topic_queue(key);
-            queue.subscribers.push(sub.clone());
-        }
+            .collect();
+        keys.iter()
+            .map(|key| self.ensure_topic_queue(key.to_string()))
+            .collect::<Vec<Queue>>()
     }
 }
 
@@ -254,11 +259,11 @@ mod tests {
             false
         );
         assert_eq!(
-            State::matches_topic(subscription_matcher.clone(), "/finance".to_string()),
+            State::matches_topic(subscription_matcher, "/finance".to_string()),
             false
         );
         assert_eq!(
-            State::matches_topic(prefix_subscription_matcher.clone(), "/finance".to_string()),
+            State::matches_topic(prefix_subscription_matcher, "/finance".to_string()),
             true
         );
     }
@@ -290,7 +295,7 @@ mod tests {
             false
         );
         assert_eq!(
-            State::matches_topic(subscription_matcher.clone(), "finance".to_string()),
+            State::matches_topic(subscription_matcher, "finance".to_string()),
             false
         );
     }
@@ -298,27 +303,18 @@ mod tests {
     #[test]
     fn complex_cases() {
         let subscription_matcher = State::from_topic("users/+/device/+/permissions/#".to_string());
-        assert_eq!(
-            State::matches_topic(
-                subscription_matcher.clone(),
-                "users/john_123/device/samsung_galaxy/permissions".to_string()
-            ),
-            true
-        );
-        assert_eq!(
-            State::matches_topic(
-                subscription_matcher.clone(),
-                "users/john_123/device/samsung galaxy/permissions/account/can_delete".to_string()
-            ),
-            true
-        );
-        assert_eq!(
-            State::matches_topic(
-                subscription_matcher.clone(),
-                "users/john_123/device/samsung_galaxy/permissions/is_admin!!".to_string()
-            ),
-            true
-        );
+        assert!(State::matches_topic(
+            subscription_matcher.clone(),
+            "users/john_123/device/samsung_galaxy/permissions".to_string()
+        ));
+        assert!(State::matches_topic(
+            subscription_matcher.clone(),
+            "users/john_123/device/samsung galaxy/permissions/account/can_delete".to_string()
+        ));
+        assert!(State::matches_topic(
+            subscription_matcher.clone(),
+            "users/john_123/device/samsung_galaxy/permissions/is_admin!!".to_string()
+        ));
         // should not match these
         assert_eq!(
             State::matches_topic(
@@ -336,7 +332,7 @@ mod tests {
         );
         assert_eq!(
             State::matches_topic(
-                subscription_matcher.clone(),
+                subscription_matcher,
                 "users/john_123/device/permissions/is_admin!!".to_string()
             ),
             false
@@ -346,49 +342,46 @@ mod tests {
     #[test]
     fn special_cases() {
         let subscription_matcher = State::from_topic("#".to_string());
-        assert_eq!(
-            State::matches_topic(
-                subscription_matcher.clone(),
-                "users/john_123/device/samsung_galaxy/permissions".to_string()
-            ),
-            true
-        );
-        assert_eq!(
-            State::matches_topic(subscription_matcher.clone(), "users".to_string()),
-            true
-        );
-        assert_eq!(
-            State::matches_topic(subscription_matcher.clone(), "/users".to_string()),
-            true
-        );
+        assert!(State::matches_topic(
+            subscription_matcher.clone(),
+            "users/john_123/device/samsung_galaxy/permissions".to_string()
+        ));
+        assert!(State::matches_topic(
+            subscription_matcher.clone(),
+            "users".to_string()
+        ));
+        assert!(State::matches_topic(
+            subscription_matcher,
+            "/users".to_string()
+        ));
         // handle +
         let subscription_matcher = State::from_topic("+".to_string());
+        assert!(State::matches_topic(
+            subscription_matcher.clone(),
+            "users".to_string()
+        ));
         assert_eq!(
-            State::matches_topic(subscription_matcher.clone(), "users".to_string()),
-            true
-        );
-        assert_eq!(
-            State::matches_topic(subscription_matcher.clone(), "users/john_123".to_string()),
+            State::matches_topic(subscription_matcher, "users/john_123".to_string()),
             false
         );
         // handle +/+
         let subscription_matcher = State::from_topic("+/+".to_string());
-        assert_eq!(
-            State::matches_topic(subscription_matcher.clone(), "users/bob".to_string()),
-            true
-        );
-        assert_eq!(
-            State::matches_topic(subscription_matcher.clone(), "/users".to_string()),
-            true
-        );
+        assert!(State::matches_topic(
+            subscription_matcher.clone(),
+            "users/bob".to_string()
+        ));
+        assert!(State::matches_topic(
+            subscription_matcher,
+            "/users".to_string()
+        ));
         // handle /+
         let subscription_matcher = State::from_topic("/+".to_string());
+        assert!(State::matches_topic(
+            subscription_matcher.clone(),
+            "/users".to_string()
+        ));
         assert_eq!(
-            State::matches_topic(subscription_matcher.clone(), "/users".to_string()),
-            true
-        );
-        assert_eq!(
-            State::matches_topic(subscription_matcher.clone(), "users".to_string()),
+            State::matches_topic(subscription_matcher, "users".to_string()),
             false
         );
     }

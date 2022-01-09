@@ -56,11 +56,11 @@ impl ByteParser {
     fn parse_string(&mut self) -> Result<String, String> {
         let str_size = self.get_str_size()?;
         if self.cursor + str_size as usize > self.buf.len() {
-            return Err(format!("Trying to take more string than present in buffer, discarding as multi-message stream"));
+            return Err("Trying to take more string than present in buffer, discarding as multi-message stream".to_string());
         }
         let s = self.take(str_size as usize)?;
         match String::from_utf8(Vec::from(s)) {
-            Ok(s) => return Ok(s),
+            Ok(s) => Ok(s),
             Err(err) => Err(format!("Failed to parse string {}", err)),
         }
     }
@@ -69,7 +69,7 @@ impl ByteParser {
         let str_size = self.get_str_size()?;
         let s = self.take(str_size as usize)?;
         match String::from_utf8(Vec::from(s)) {
-            Ok(s) => return Ok(s),
+            Ok(s) => Ok(s),
             Err(err) => Err(format!("Failed to parse string {}", err)),
         }
     }
@@ -101,16 +101,16 @@ impl ByteParser {
         let flags = control_packet[0] & 0b00001111;
         let control_packet = ControlPacketType::from_bits_truncate(control_packet[0] >> 4);
         let length = self.take_while(is_variable_length_int)?;
-        let mut length = if length.len() > 1 {
-            length[..length.len() - 1]
-                .iter()
-                .enumerate()
-                .fold(0, |acc, (i, x)| acc + (x << (i * 8)) as u32)
-                + length[length.len() - 1] as u32
-        } else if length.len() == 1 {
-            length[0] as u32
-        } else {
-            0u32
+        let mut length = match length.len() {
+            2.. => {
+                length[..length.len() - 1]
+                    .iter()
+                    .enumerate()
+                    .fold(0, |acc, (i, x)| acc + (x << (i * 8)) as u32)
+                    + length[length.len() - 1] as u32
+            }
+            1 => length[0] as u32,
+            _ => 0u32,
         };
         length += self.take(1)?[0] as u32;
         Ok(FixedHeader {
@@ -158,6 +158,46 @@ impl ByteParser {
         })
     }
 
+    fn build_connect_payload(
+        payload: Vec<String>,
+        ConnectFlags {
+            user_name,
+            password,
+            will,
+            ..
+        }: ConnectFlags,
+    ) -> ConnectPayload {
+        let (will_offset, will_topic, will_message) = if will {
+            (
+                2,
+                Some(payload[1].to_string()),
+                Some(payload[2].to_string()),
+            )
+        } else {
+            (0, None, None)
+        };
+        let (user_name, password) = (
+            if user_name {
+                Some(payload[will_offset + 1].to_string())
+            } else {
+                None
+            },
+            if password {
+                Some(payload[will_offset + 2].to_string())
+            } else {
+                None
+            },
+        );
+
+        ConnectPayload {
+            client_id: payload[0].to_string(),
+            will_message,
+            will_topic,
+            user_name,
+            password,
+        }
+    }
+
     pub fn parse_connect_message(
         &mut self,
         fixed_header: FixedHeader,
@@ -175,7 +215,12 @@ impl ByteParser {
                 }
             }
         }
-        return Ok(MqttMessage::Connect(fixed_header, variable_header, payload));
+        let flags = variable_header.connect_flags.clone();
+        Ok(MqttMessage::Connect(
+            fixed_header,
+            variable_header,
+            ByteParser::build_connect_payload(payload, flags),
+        ))
     }
 
     pub fn parse_publish_message(
@@ -191,12 +236,7 @@ impl ByteParser {
             Err(e) => return Err(format!("Failed to push buf to string {:?}", e)),
         };
 
-        return Ok(MqttMessage::Publish(
-            fixed_header,
-            variable_header,
-            payload,
-            PublishSource::Client,
-        ));
+        Ok(MqttMessage::Publish(fixed_header, variable_header, payload))
     }
 
     pub fn parse_subscribe_message(
@@ -218,11 +258,11 @@ impl ByteParser {
             }
         }
 
-        return Ok(MqttMessage::Subscribe(
+        Ok(MqttMessage::Subscribe(
             fixed_header,
             variable_header,
             payload,
-        ));
+        ))
     }
 
     pub fn parse_mqtt(&mut self) -> Result<MqttMessage, String> {

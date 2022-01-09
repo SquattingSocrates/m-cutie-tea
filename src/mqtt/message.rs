@@ -1,9 +1,7 @@
 use super::flags::ControlPacketType;
 use serde::{Deserialize, Serialize};
 
-pub type MessageID = u32;
-pub type QoS = u8;
-pub type Blob = String;
+use crate::{Blob, MessageID, QoS};
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub enum PublishSource {
@@ -20,7 +18,7 @@ pub struct FixedHeader {
     pub retain: bool,
 }
 
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
 pub struct ConnectFlags {
     pub user_name: bool,
     pub password: bool,
@@ -72,7 +70,7 @@ pub enum VariableHeader {
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum MqttMessage {
-    Connect(FixedHeader, ConnectVariableHeader, Vec<String>),
+    Connect(FixedHeader, ConnectVariableHeader, ConnectPayload),
     Connack(FixedHeader, MessageIDVariableHeader),
     Subscribe(
         FixedHeader,
@@ -80,7 +78,7 @@ pub enum MqttMessage {
         Vec<SubscriptionRequest>,
     ),
     Suback(FixedHeader, MessageIDVariableHeader, Vec<QoS>),
-    Publish(FixedHeader, PublishVariableHeader, Blob, PublishSource),
+    Publish(FixedHeader, PublishVariableHeader, Blob),
     Puback(FixedHeader, MessageIDVariableHeader, MessageID),
     Pubrec(FixedHeader, MessageIDVariableHeader),
     Pubrel(FixedHeader, MessageIDVariableHeader),
@@ -93,6 +91,15 @@ pub enum MqttMessage {
     Unknown,
 }
 
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct ConnectPayload {
+    pub client_id: String,
+    pub will_topic: Option<String>,
+    pub will_message: Option<String>,
+    pub user_name: Option<String>,
+    pub password: Option<String>,
+}
+
 type DualByteNum = Vec<u8>;
 type VariableNum = Vec<u8>;
 
@@ -103,72 +110,69 @@ enum MessageTypeFlag {
 }
 
 impl MqttMessage {
-    pub fn to_response(&self) -> Vec<u8> {
-        match self {
-            MqttMessage::Pingreq(_) => vec![(ControlPacketType::PINGRESP.bits() << 4), 0x0],
-            MqttMessage::Connect(_, _, _) => {
-                vec![ControlPacketType::CONNACK.bits() << 4, 0x2, 0x0, 0x0]
-            }
-            MqttMessage::Subscribe(_, variable, payload) => {
-                let flag = ControlPacketType::SUBACK;
-                MqttMessage::bytes_with_message_id(
-                    MessageTypeFlag::Standard(flag),
-                    variable.message_id,
-                    Some(payload.iter().map(|x| x.qos).collect()),
-                )
-            }
-            MqttMessage::Publish(fixed, variable, _, PublishSource::Client) => {
-                if fixed.qos == 0 {
-                    return Vec::new();
-                }
-                let flag = if fixed.qos == 1 {
-                    ControlPacketType::PUBACK
-                } else {
-                    ControlPacketType::PUBREC
-                };
-                MqttMessage::bytes_with_message_id(
-                    MessageTypeFlag::Standard(flag),
-                    variable.message_id,
-                    None,
-                )
-            }
-            MqttMessage::Publish(fixed, variable, payload, PublishSource::Server) => {
-                if fixed.qos == 0 {
-                    return Vec::new();
-                }
-                let flag = ControlPacketType::PUBLISH;
-                MqttMessage::bytes_with_message_id(
-                    MessageTypeFlag::Standard(flag),
-                    variable.message_id,
-                    Some(String::into_bytes(payload.to_string())),
-                )
-            }
-            MqttMessage::Pubrec(_, variable) => MqttMessage::bytes_with_message_id(
-                MessageTypeFlag::Custom(ControlPacketType::PUBREL.bits() << 4 | 0x2),
-                variable.message_id,
-                None,
-            ),
-            MqttMessage::Pubrel(_, variable) => MqttMessage::bytes_with_message_id(
-                MessageTypeFlag::Standard(ControlPacketType::PUBCOMP),
-                variable.message_id,
-                None,
-            ),
-            _ => Vec::new(),
-        }
-    }
+    // pub fn to_response(&self) -> Vec<u8> {
+    //     match self {
+    //         MqttMessage::Pingreq(_) => vec![(ControlPacketType::PINGRESP.bits() << 4), 0x0],
+    //         MqttMessage::Connect(_, _, _) => {
+    //             vec![ControlPacketType::CONNACK.bits() << 4, 0x2, 0x0, 0x0]
+    //         }
+    //         MqttMessage::Subscribe(_, variable, payload) => {
+    //             let flag = ControlPacketType::SUBACK;
+    //             MqttMessage::bytes_with_message_id(
+    //                 MessageTypeFlag::Standard(flag),
+    //                 variable.message_id,
+    //                 Some(payload.iter().map(|x| x.qos).collect()),
+    //             )
+    //         }
+    //         MqttMessage::Publish(fixed, variable, _, PublishSource::Client) => {
+    //             if fixed.qos == 0 {
+    //                 return Vec::new();
+    //             }
+    //             let flag = if fixed.qos == 1 {
+    //                 ControlPacketType::PUBACK
+    //             } else {
+    //                 ControlPacketType::PUBREC
+    //             };
+    //             MqttMessage::bytes_with_message_id(
+    //                 MessageTypeFlag::Standard(flag),
+    //                 variable.message_id,
+    //                 None,
+    //             )
+    //         }
+    //         MqttMessage::Publish(fixed, variable, payload, PublishSource::Server) => {
+    //             if fixed.qos == 0 {
+    //                 return Vec::new();
+    //             }
+    //             let flag = ControlPacketType::PUBLISH;
+    //             MqttMessage::bytes_with_message_id(
+    //                 MessageTypeFlag::Standard(flag),
+    //                 variable.message_id,
+    //                 Some(String::into_bytes(payload.to_string())),
+    //             )
+    //         }
+    //         MqttMessage::Pubrec(_, variable) => MqttMessage::bytes_with_message_id(
+    //             MessageTypeFlag::Custom(ControlPacketType::PUBREL.bits() << 4 | 0x2),
+    //             variable.message_id,
+    //             None,
+    //         ),
+    //         MqttMessage::Pubrel(_, variable) => MqttMessage::bytes_with_message_id(
+    //             MessageTypeFlag::Standard(ControlPacketType::PUBCOMP),
+    //             variable.message_id,
+    //             None,
+    //         ),
+    //         _ => Vec::new(),
+    //     }
+    // }
 
-    fn bytes_with_message_id(
-        flag: MessageTypeFlag,
-        message_id: u32,
-        payload: Option<Vec<u8>>,
-    ) -> Vec<u8> {
+    pub fn bytes_with_message_id(flag: u8, message_id: u32, payload: Option<Vec<u8>>) -> Vec<u8> {
         println!("Wrapping message {:?} {:?} {:?}", flag, message_id, payload);
-        let flag = match flag {
-            MessageTypeFlag::Custom(b) => b,
-            MessageTypeFlag::Standard(t) => t.bits() << 4,
-        };
+        // let flag = match flag {
+        //     MessageTypeFlag::Custom(b) => b,
+        //     MessageTypeFlag::Standard(t) => t.bits() << 4,
+        // };
+        let flag = if flag <= 16 { flag << 4 } else { flag };
         let mut message_id = MqttMessage::encode_multibyte_num(message_id);
-        let mut payload = payload.unwrap_or(Vec::new());
+        let mut payload = payload.unwrap_or_default();
         let remaining_length = message_id.len() + payload.len();
         let mut length = MqttMessage::encode_variable_num(remaining_length as u32);
         println!(
@@ -185,18 +189,18 @@ impl MqttMessage {
         v
     }
 
-    fn encode_multibyte_num(message_id: u32) -> DualByteNum {
+    pub fn encode_multibyte_num(message_id: u32) -> DualByteNum {
         // println!("SPLITTING MESSAGE_ID {}", message_id, message_id >> 8, message_id as u8);
         vec![(message_id >> 8) as u8, message_id as u8]
     }
 
-    fn encode_variable_num(mut length: u32) -> VariableNum {
+    pub fn encode_variable_num(mut length: u32) -> VariableNum {
         let mut v = Vec::<u8>::with_capacity(4);
         while length > 0 {
             let mut next = length % 128;
             length /= 128;
             if length > 0 {
-                next = next | 0x80;
+                next |= 0x80;
             }
             v.push(next as u8);
         }
