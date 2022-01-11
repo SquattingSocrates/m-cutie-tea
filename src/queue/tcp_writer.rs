@@ -15,6 +15,7 @@ fn serialize_connection_message<'a>(msg: &ConnectionMessage) -> (bool, Vec<u8>) 
         ),
         // TODO: ping should have data about keep-alive, not always true here
         ConnectionMessage::Ping => (true, vec![(ControlPacketType::PINGRESP.bits() << 4), 0x0]),
+        _ => (false, vec![]),
     }
 }
 
@@ -64,6 +65,10 @@ pub fn write_mqtt(mut stream: net::TcpStream, mailbox: Mailbox<WriterMessage>) {
         match mailbox.receive() {
             Ok(data) => match &data {
                 WriterMessage::Connection(msg, maybe_stream) => {
+                    if let ConnectionMessage::Destroy = msg {
+                        println!("Destroying old tcp_writer process");
+                        return;
+                    }
                     println!("Received WriterMessage::Connection {:?}", msg);
                     let stuff = maybe_stream.is_some();
                     if stuff {

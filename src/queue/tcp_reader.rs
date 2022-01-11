@@ -10,11 +10,11 @@ use std::io::BufReader;
 
 use crate::mqtt::{message::MqttMessage, parser::ByteParser};
 use crate::structure::{
-    BrokerRequest, BrokerResponse, ConnectionConfig, ConnectionMessage, Queue, QueueRequest,
-    WriterMessage, WriterQueueResponse,
+    BrokerRequest, BrokerResponse, ConnectionMessage, Queue, QueueRequest, SessionConfig,
+    SessionRequest, WriterMessage, WriterQueueResponse,
 };
 
-pub fn handle_tcp(mut stream: net::TcpStream, mailbox: Mailbox<ConnectionConfig>) {
+pub fn handle_tcp(mut stream: net::TcpStream, mailbox: Mailbox<SessionRequest>) {
     let broker = lookup::<Request<BrokerRequest, BrokerResponse>>("broker", "1.0.0");
     let broker = broker.unwrap().unwrap();
 
@@ -39,20 +39,22 @@ pub fn handle_tcp(mut stream: net::TcpStream, mailbox: Mailbox<ConnectionConfig>
     // let mut cursor = 0usize;
     if let MqttMessage::Connect(_, variable, payload) = parser.parse_mqtt().unwrap() {
         client_id = payload.client_id.clone();
+        println!("CONNECT FLAGS {:?}", variable.connect_flags);
         if !variable.connect_flags.clean_session {
-            if let BrokerResponse::ExistingSession(Some(proc)) = broker
+            let res = broker
                 .request(BrokerRequest::HasProcess(client_id.clone()))
-                .unwrap()
-            {
+                .unwrap();
+            println!("RESPONSE FROM BROKER {:?}", res);
+            if let BrokerResponse::ExistingSession(Some(proc)) = res {
                 println!(
                     "Transferred control to existing process {:?} {:?}",
                     variable, payload
                 );
-                proc.send(ConnectionConfig {
+                proc.send(SessionRequest::Create(SessionConfig {
                     stream: stream.clone(),
                     variable_header: variable,
                     payload: payload,
-                });
+                }));
 
                 return;
             }
@@ -67,11 +69,20 @@ pub fn handle_tcp(mut stream: net::TcpStream, mailbox: Mailbox<ConnectionConfig>
     // let this = process::this(&mailbox);
     let writer_process = process::spawn_with(stream.clone(), tcp_writer::write_mqtt).unwrap();
 
-    // send writer first CONNECT
-    writer_process.send(WriterMessage::Connection(
-        ConnectionMessage::Connect(0x0),
-        Some(stream.clone()),
-    ));
+    // this should also destroy the other session if any
+    if let BrokerResponse::Registered = broker
+        .request(BrokerRequest::RegisterSession(
+            client_id.clone(),
+            this.clone(),
+        ))
+        .unwrap()
+    {
+        // send writer first CONNECT
+        writer_process.send(WriterMessage::Connection(
+            ConnectionMessage::Connect(0x0),
+            Some(stream.clone()),
+        ));
+    }
 
     loop {
         if !is_receiving {
@@ -81,9 +92,9 @@ pub fn handle_tcp(mut stream: net::TcpStream, mailbox: Mailbox<ConnectionConfig>
             );
             match mailbox.receive() {
                 Ok(new_stream) => match new_stream {
-                    ConnectionConfig {
+                    SessionRequest::Create(SessionConfig {
                         stream: new_stream, ..
-                    } => {
+                    }) => {
                         println!("RECEIVED RECONN IN MAILBOX");
                         stream = new_stream;
                         is_receiving = true;
@@ -91,7 +102,12 @@ pub fn handle_tcp(mut stream: net::TcpStream, mailbox: Mailbox<ConnectionConfig>
                             ConnectionMessage::Connect(0x0),
                             Some(stream.clone()),
                         ));
-                        break;
+                        continue;
+                    }
+                    SessionRequest::Destroy => {
+                        writer_process
+                            .send(WriterMessage::Connection(ConnectionMessage::Destroy, None));
+                        return;
                     }
                 },
                 Err(e) => {
@@ -110,6 +126,8 @@ pub fn handle_tcp(mut stream: net::TcpStream, mailbox: Mailbox<ConnectionConfig>
             Ok(v) => {
                 let vc = v.to_vec();
                 if vc.is_empty() {
+                    // if vec is empty, the underlying stream is closed
+                    is_receiving = false;
                     continue;
                 }
                 println!("RAW {:?}", vc);

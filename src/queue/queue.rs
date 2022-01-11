@@ -4,7 +4,7 @@ use crate::structure::{QueueRequest, Subscription, WriterMessage, WriterQueueRes
 
 pub fn new_queue(name: String, mailbox: Mailbox<QueueRequest>) {
     let mut subscribers = Vec::<Subscription>::new();
-    let mut retained_msg = String::new();
+    let mut retained_msg = None;
 
     loop {
         match mailbox.receive() {
@@ -16,7 +16,7 @@ pub fn new_queue(name: String, mailbox: Mailbox<QueueRequest>) {
                         println!("SUBSCRIBERS IN LIST: {}", subscribers.len());
                         for sub in subscribers.iter() {
                             if fixed.retain {
-                                retained_msg = payload.clone();
+                                retained_msg = Some(payload.clone());
                             }
                             sub.process
                                 .send(WriterMessage::Queue(WriterQueueResponse::Publish(

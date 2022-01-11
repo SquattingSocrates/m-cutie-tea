@@ -17,16 +17,6 @@ pub struct WildcardSubscription {
     sub: Subscription,
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
-pub enum TopicPattern {
-    All,
-    Literal(String),
-    MatchAnyAfter(Box<TopicPattern>),
-    AnyOne(Box<TopicPattern>, Box<TopicPattern>),
-    SingleLevel,
-    SinglePrefix,
-}
-
 #[derive(Debug, PartialEq, Clone)]
 pub struct State {
     // id: u32,

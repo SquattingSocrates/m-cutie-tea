@@ -9,7 +9,7 @@ use lunatic::{process::Process, Mailbox, Message, Request, TransformMailbox};
 pub fn broker_process(mailbox: Mailbox<Request<BrokerRequest, BrokerResponse>>) {
     let mailbox = mailbox.catch_link_panic();
     let mut subs = TopicTree::new();
-    let mut clients = HashMap::<String, Process<ConnectionConfig>>::new();
+    let mut clients = HashMap::<String, Process<SessionRequest>>::new();
     loop {
         match mailbox.receive() {
             Message::Normal(message) => {
@@ -31,13 +31,14 @@ pub fn broker_process(mailbox: Mailbox<Request<BrokerRequest, BrokerResponse>>) 
                         message.reply(BrokerResponse::MatchingQueue(q.clone()));
                     }
                     BrokerRequest::RegisterSession(client_id, process) => {
-                        if let Some(_) = clients.insert(client_id.to_string(), process.clone()) {
-                            message.reply(BrokerResponse::Registered);
-                        } else {
-                            eprintln!("Failed to insert client_id into clients tree {}", client_id);
+                        println!("REGISTERING SESSION {}", client_id);
+                        if let Some(prev) = clients.insert(client_id.to_string(), process.clone()) {
+                            prev.send(SessionRequest::Destroy);
                         }
+                        message.reply(BrokerResponse::Registered);
                     }
                     BrokerRequest::HasProcess(client_id) => {
+                        println!("CHECKING HAS PROCESS {} {:?}", client_id, clients);
                         if let Some(process) = clients.get(client_id) {
                             message.reply(BrokerResponse::ExistingSession(Some(process.clone())));
                         } else {

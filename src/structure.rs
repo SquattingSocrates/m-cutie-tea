@@ -17,7 +17,7 @@ pub enum QueueRequest {
 pub enum BrokerRequest {
     GetQueue(Topic),
     Subscribe(String, Vec<SubscriptionRequest>, Process<WriterMessage>),
-    RegisterSession(String, Process<ConnectionConfig>),
+    RegisterSession(String, Process<SessionRequest>),
     HasProcess(String),
 }
 
@@ -26,7 +26,7 @@ pub enum BrokerResponse {
     MatchingQueue(Queue),
     Subscribed,
     Registered,
-    ExistingSession(Option<Process<ConnectionConfig>>),
+    ExistingSession(Option<Process<SessionRequest>>),
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -56,6 +56,7 @@ pub enum ConnectionMessage {
     Ping,
     Disconnect,
     Connect(u8),
+    Destroy,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -65,8 +66,14 @@ pub enum WriterMessage {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct ConnectionConfig {
+pub struct SessionConfig {
     pub stream: net::TcpStream,
     pub variable_header: ConnectVariableHeader,
     pub payload: ConnectPayload,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum SessionRequest {
+    Create(SessionConfig),
+    Destroy,
 }
