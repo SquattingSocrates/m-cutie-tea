@@ -1,6 +1,6 @@
 use crate::{
     mqtt::{flags::ControlPacketType, message::MqttMessage},
-    structure::{ConnectionMessage, WriterMessage, WriterQueueResponse},
+    structure::{ConnectionMessage, QueueResponse, WriterMessage},
 };
 use lunatic::{net, Mailbox};
 use std::io::Write;
@@ -19,44 +19,7 @@ fn serialize_connection_message<'a>(msg: &ConnectionMessage) -> (bool, Vec<u8>) 
     }
 }
 
-// pub fn serialize_connection_message<'a>(msg: &'a ConnectionMessage) -> &'a [u8] {
-//     vec![]
-//         MqttMessage::Subscribe(_, variable, payload) => {
-//             let flag = ControlPacketType::SUBACK;
-//             MqttMessage::bytes_with_message_id(
-//                 MessageTypeFlag::Standard(flag),
-//                 variable.message_id,
-//                 Some(payload.iter().map(|x| x.qos).collect()),
-//             )
-//         }
-//         MqttMessage::Publish(fixed, variable, _, PublishSource::Client) => {
-//             if fixed.qos == 0 {
-//                 return Vec::new();
-//             }
-//             let flag = if fixed.qos == 1 {
-//                 ControlPacketType::PUBACK
-//             } else {
-//                 ControlPacketType::PUBREC
-//             };
-//             MqttMessage::bytes_with_message_id(
-//                 MessageTypeFlag::Standard(flag),
-//                 variable.message_id,
-//                 None,
-//             )
-//         }
-//         MqttMessage::Pubrec(_, variable) => MqttMessage::bytes_with_message_id(
-//             MessageTypeFlag::Custom(ControlPacketType::PUBREL.bits() << 4 | 0x2),
-//             variable.message_id,
-//             None,
-//         ),
-//         MqttMessage::Pubrel(_, variable) => MqttMessage::bytes_with_message_id(
-//             MessageTypeFlag::Standard(ControlPacketType::PUBCOMP),
-//             variable.message_id,
-//             None,
-//         ),
-// }
-
-// This process has a one mailbox that it listens to
+// This process has a one mailbox that it's listening to
 // but there can be multiple types of messages
 pub fn write_mqtt(mut stream: net::TcpStream, mailbox: Mailbox<WriterMessage>) {
     let mut is_receiving = true;
@@ -84,7 +47,7 @@ pub fn write_mqtt(mut stream: net::TcpStream, mailbox: Mailbox<WriterMessage>) {
                     };
                 }
                 WriterMessage::Queue(s) => match &s {
-                    WriterQueueResponse::Publish(message_id, topic, blob, qos) => {
+                    QueueResponse::Publish(message_id, _, blob, _) => {
                         // TODO: buffer messages with qos > 0
                         if !is_receiving {
                             continue;
@@ -102,7 +65,7 @@ pub fn write_mqtt(mut stream: net::TcpStream, mailbox: Mailbox<WriterMessage>) {
                             }
                         };
                     }
-                    WriterQueueResponse::Subscribe(message_id, subs) => {
+                    QueueResponse::Subscribe(message_id, subs) => {
                         if !is_receiving {
                             continue;
                         }
@@ -118,13 +81,13 @@ pub fn write_mqtt(mut stream: net::TcpStream, mailbox: Mailbox<WriterMessage>) {
                             }
                         };
                     }
-                    WriterQueueResponse::Unsubscribe(message_id, from_topics) => {
+                    QueueResponse::Unsubscribe(message_id, _) => {
                         if !is_receiving {
                             continue;
                         }
                         let message_id = MqttMessage::encode_multibyte_num(*message_id);
                         match stream.write_all(&[
-                            (ControlPacketType::UNSUBACK.bits() << 4),
+                            (ControlPacketType::UNSUBACK.bits() << 4) + 0x2,
                             0x2,
                             message_id[0],
                             message_id[1],
@@ -132,6 +95,23 @@ pub fn write_mqtt(mut stream: net::TcpStream, mailbox: Mailbox<WriterMessage>) {
                             Ok(_) => println!("Wrote suback to client"),
                             Err(e) => {
                                 eprintln!("Failed to write suback to stream {:?}", e)
+                            }
+                        };
+                    }
+                    QueueResponse::Puback(message_id) => {
+                        // TODO: maybe handle publisher losing connection?
+                        if !is_receiving {
+                            continue;
+                        }
+                        let res = MqttMessage::bytes_with_message_id(
+                            ControlPacketType::PUBACK.bits(),
+                            *message_id,
+                            None,
+                        );
+                        match stream.write_all(&res) {
+                            Ok(_) => println!("Wrote publish to client"),
+                            Err(e) => {
+                                eprintln!("Failed to write publish to stream {:?}", e)
                             }
                         };
                     }

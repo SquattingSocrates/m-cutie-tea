@@ -1,6 +1,5 @@
-use super::tcp_writer;
 use lunatic::{
-    lookup, net,
+    net,
     process::{self, Process},
     Mailbox, Request,
 };
@@ -10,80 +9,23 @@ use std::io::BufReader;
 
 use crate::mqtt::{message::MqttMessage, parser::ByteParser};
 use crate::structure::{
-    BrokerRequest, BrokerResponse, ConnectionMessage, Queue, QueueRequest, SessionConfig,
-    SessionRequest, WriterMessage, WriterQueueResponse,
+    BrokerRequest, BrokerResponse, ConnectionMessage, Queue, QueueRequest, QueueResponse,
+    SessionConfig, SessionRequest, WriterMessage,
 };
 
-pub fn handle_tcp(mut stream: net::TcpStream, mailbox: Mailbox<SessionRequest>) {
-    let broker = lookup::<Request<BrokerRequest, BrokerResponse>>("broker", "1.0.0");
-    let broker = broker.unwrap().unwrap();
-
+pub fn handle_tcp(
+    (mut client_id, writer_process, mut stream, broker): (
+        String,
+        Process<WriterMessage>,
+        net::TcpStream,
+        Process<Request<BrokerRequest, BrokerResponse>>,
+    ),
+    mailbox: Mailbox<SessionRequest>,
+) {
     // controls whether data is read from tcp_stream
     let mut is_receiving = true;
-
-    // session_data
-    let mut client_id = String::new();
-
     let this = process::this(&mailbox);
     let mut pub_queues: HashMap<String, Queue> = HashMap::new();
-
-    // first, wait for a connect message
-    let mut reader = BufReader::new(&mut stream);
-    let data = reader.fill_buf().unwrap();
-    let vc = data.to_vec();
-    if vc.is_empty() {
-        panic!("Received empty connect request");
-    }
-    println!("CONNECT {:?}", vc);
-    let mut parser = ByteParser::new(vc);
-    // let mut cursor = 0usize;
-    if let MqttMessage::Connect(_, variable, payload) = parser.parse_mqtt().unwrap() {
-        client_id = payload.client_id.clone();
-        println!("CONNECT FLAGS {:?}", variable.connect_flags);
-        if !variable.connect_flags.clean_session {
-            let res = broker
-                .request(BrokerRequest::HasProcess(client_id.clone()))
-                .unwrap();
-            println!("RESPONSE FROM BROKER {:?}", res);
-            if let BrokerResponse::ExistingSession(Some(proc)) = res {
-                println!(
-                    "Transferred control to existing process {:?} {:?}",
-                    variable, payload
-                );
-                proc.send(SessionRequest::Create(SessionConfig {
-                    stream: stream.clone(),
-                    variable_header: variable,
-                    payload: payload,
-                }));
-
-                return;
-            }
-        }
-    } else {
-        panic!("First request is not CONNECT");
-    }
-
-    println!("SETUP CONNECTION {} {}", client_id, is_receiving);
-
-    // spawn a process that will send responses to tcp stream
-    // let this = process::this(&mailbox);
-    let writer_process = process::spawn_with(stream.clone(), tcp_writer::write_mqtt).unwrap();
-
-    // this should also destroy the other session if any
-    if let BrokerResponse::Registered = broker
-        .request(BrokerRequest::RegisterSession(
-            client_id.clone(),
-            this.clone(),
-        ))
-        .unwrap()
-    {
-        // send writer first CONNECT
-        writer_process.send(WriterMessage::Connection(
-            ConnectionMessage::Connect(0x0),
-            Some(stream.clone()),
-        ));
-    }
-
     loop {
         if !is_receiving {
             println!(
@@ -179,6 +121,11 @@ pub fn handle_tcp(mut stream: net::TcpStream, mailbox: Mailbox<SessionRequest>) 
                                     fixed.clone(),
                                     variable.clone(),
                                     payload.clone(),
+                                    if fixed.qos == 0 {
+                                        None
+                                    } else {
+                                        Some(writer_process.clone())
+                                    },
                                 ));
                             }
                             MqttMessage::Subscribe(_, variable, subs) => {
@@ -190,14 +137,14 @@ pub fn handle_tcp(mut stream: net::TcpStream, mailbox: Mailbox<SessionRequest>) 
                                     Ok(data) => {
                                         println!("RESPONSE FROM BROKER ON SUBSCRIBE {:?}", data);
                                         writer_process.send(WriterMessage::Queue(
-                                            WriterQueueResponse::Subscribe(
+                                            QueueResponse::Subscribe(
                                                 variable.message_id,
                                                 subs.to_vec(),
                                             ),
                                         ))
                                     }
                                     Err(e) => {
-                                        eprintln!("Failed to subscribe {:?}", subs);
+                                        eprintln!("Failed to subscribe {:?}. Error: {}", subs, e);
                                     }
                                 }
                             }
@@ -208,7 +155,6 @@ pub fn handle_tcp(mut stream: net::TcpStream, mailbox: Mailbox<SessionRequest>) 
                     }
                     Err(e) => {
                         eprintln!("Failed to parse mqtt message: {:?}", e);
-                        // stream.write_all(e.as_bytes()).unwrap();
                     }
                 }
             }

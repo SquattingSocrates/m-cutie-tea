@@ -1,17 +1,8 @@
-use lunatic::{
-    net,
-    process::{self, Process},
-    Config, Environment,
-};
+use lunatic::{net, process, Config, Environment};
 
 // use mqtt_broker::queue::{broker, tcp_reader};
 use mqtt_broker::broker;
-use mqtt_broker::queue::tcp_reader;
-
-struct ClientProcess {
-    client_id: String,
-    process: Process<Option<net::TcpStream>>,
-}
+use mqtt_broker::queue;
 
 fn main() {
     let mut client_conf = Config::new(5_000_000, None);
@@ -33,7 +24,7 @@ fn main() {
     let listener = net::TcpListener::bind(address).unwrap();
     while let Ok((stream, _)) = listener.accept() {
         client_module
-            .spawn_with(stream, tcp_reader::handle_tcp)
+            .spawn_with(stream, queue::connect_client)
             .unwrap();
     }
 }

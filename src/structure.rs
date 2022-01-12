@@ -8,7 +8,12 @@ use crate::{Blob, MessageID, QoS, Topic};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum QueueRequest {
-    Publish(FixedHeader, PublishVariableHeader, Blob),
+    Publish(
+        FixedHeader,
+        PublishVariableHeader,
+        Blob,
+        Option<Process<WriterMessage>>,
+    ),
     Subscribe(Subscription),
     Unsubscribe(String),
 }
@@ -45,10 +50,11 @@ pub struct Queue {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub enum WriterQueueResponse {
+pub enum QueueResponse {
     Publish(MessageID, Topic, Blob, QoS),
     Subscribe(MessageID, Vec<SubscriptionRequest>),
     Unsubscribe(MessageID, Vec<Topic>),
+    Puback(MessageID),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -61,7 +67,7 @@ pub enum ConnectionMessage {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum WriterMessage {
-    Queue(WriterQueueResponse),
+    Queue(QueueResponse),
     Connection(ConnectionMessage, Option<net::TcpStream>),
 }
 

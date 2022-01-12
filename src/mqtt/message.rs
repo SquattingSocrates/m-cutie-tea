@@ -103,73 +103,9 @@ pub struct ConnectPayload {
 type DualByteNum = Vec<u8>;
 type VariableNum = Vec<u8>;
 
-#[derive(Debug)]
-enum MessageTypeFlag {
-    Standard(ControlPacketType),
-    Custom(u8),
-}
-
 impl MqttMessage {
-    // pub fn to_response(&self) -> Vec<u8> {
-    //     match self {
-    //         MqttMessage::Pingreq(_) => vec![(ControlPacketType::PINGRESP.bits() << 4), 0x0],
-    //         MqttMessage::Connect(_, _, _) => {
-    //             vec![ControlPacketType::CONNACK.bits() << 4, 0x2, 0x0, 0x0]
-    //         }
-    //         MqttMessage::Subscribe(_, variable, payload) => {
-    //             let flag = ControlPacketType::SUBACK;
-    //             MqttMessage::bytes_with_message_id(
-    //                 MessageTypeFlag::Standard(flag),
-    //                 variable.message_id,
-    //                 Some(payload.iter().map(|x| x.qos).collect()),
-    //             )
-    //         }
-    //         MqttMessage::Publish(fixed, variable, _, PublishSource::Client) => {
-    //             if fixed.qos == 0 {
-    //                 return Vec::new();
-    //             }
-    //             let flag = if fixed.qos == 1 {
-    //                 ControlPacketType::PUBACK
-    //             } else {
-    //                 ControlPacketType::PUBREC
-    //             };
-    //             MqttMessage::bytes_with_message_id(
-    //                 MessageTypeFlag::Standard(flag),
-    //                 variable.message_id,
-    //                 None,
-    //             )
-    //         }
-    //         MqttMessage::Publish(fixed, variable, payload, PublishSource::Server) => {
-    //             if fixed.qos == 0 {
-    //                 return Vec::new();
-    //             }
-    //             let flag = ControlPacketType::PUBLISH;
-    //             MqttMessage::bytes_with_message_id(
-    //                 MessageTypeFlag::Standard(flag),
-    //                 variable.message_id,
-    //                 Some(String::into_bytes(payload.to_string())),
-    //             )
-    //         }
-    //         MqttMessage::Pubrec(_, variable) => MqttMessage::bytes_with_message_id(
-    //             MessageTypeFlag::Custom(ControlPacketType::PUBREL.bits() << 4 | 0x2),
-    //             variable.message_id,
-    //             None,
-    //         ),
-    //         MqttMessage::Pubrel(_, variable) => MqttMessage::bytes_with_message_id(
-    //             MessageTypeFlag::Standard(ControlPacketType::PUBCOMP),
-    //             variable.message_id,
-    //             None,
-    //         ),
-    //         _ => Vec::new(),
-    //     }
-    // }
-
     pub fn bytes_with_message_id(flag: u8, message_id: u32, payload: Option<Vec<u8>>) -> Vec<u8> {
         println!("Wrapping message {:?} {:?} {:?}", flag, message_id, payload);
-        // let flag = match flag {
-        //     MessageTypeFlag::Custom(b) => b,
-        //     MessageTypeFlag::Standard(t) => t.bits() << 4,
-        // };
         let flag = if flag <= 16 { flag << 4 } else { flag };
         let mut message_id = MqttMessage::encode_multibyte_num(message_id);
         let mut payload = payload.unwrap_or_default();
