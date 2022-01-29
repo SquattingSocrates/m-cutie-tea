@@ -60,8 +60,18 @@ version = "0.1.0"
 dependencies = [
  "bitflags",
  "lunatic",
+ "mqtt_packet_3_5",
  "nom",
  "num",
+ "serde",
+]
+
+[[package]]
+name = "mqtt_packet_3_5"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af1ae865f7e334fda6ee051129a146953f2f0fdd3a9b5584045e90a01e8cf832"
+dependencies = [
  "serde",
 ]
 

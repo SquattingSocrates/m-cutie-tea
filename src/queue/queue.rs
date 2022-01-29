@@ -1,9 +1,17 @@
 use lunatic::Mailbox;
 
-use crate::structure::{QueueRequest, QueueResponse, Subscription, WriterMessage};
+use crate::structure::*;
+use mqtt_packet_3_5::{
+    ConfirmationPacket, FixedHeader, MqttPacket, PacketType, PubackPubrecCode, PublishPacket,
+    Subscription,
+};
+
+trait QueueMessage {
+    fn handle_queue(&mut self);
+}
 
 pub fn new_queue(name: String, mailbox: Mailbox<QueueRequest>) {
-    let mut subscribers = Vec::<Subscription>::new();
+    let mut subscribers = Vec::<(Subscription, WriterProcess)>::new();
     let mut retained_msg = None;
 
     loop {
@@ -11,44 +19,49 @@ pub fn new_queue(name: String, mailbox: Mailbox<QueueRequest>) {
             Ok(data) => {
                 println!("[Queue {}] Received mqtt message {:?}", name, data);
                 match &data {
-                    QueueRequest::Publish(fixed, variable, payload, publisher) => {
+                    QueueRequest::Publish(packet, publisher) => {
                         // QoS 0 - fire and forget
                         println!("SUBSCRIBERS IN LIST: {}", subscribers.len());
-                        for sub in subscribers.iter() {
-                            if fixed.retain {
-                                retained_msg = Some((variable.message_id, payload.to_string()));
+                        for (sub, proc) in subscribers.iter() {
+                            if packet.fixed.retain {
+                                retained_msg = Some((packet.message_id, packet.payload.clone()));
                             }
-                            sub.process
-                                .send(WriterMessage::Queue(QueueResponse::Publish(
-                                    variable.message_id,
-                                    variable.topic_name.to_string(),
-                                    payload.to_string(),
-                                    fixed.qos,
-                                )));
+                            proc.send(WriterMessage::Queue(MqttPacket::Publish(packet.clone())));
                         }
 
-                        if fixed.qos == 1 {
-                            let publisher = publisher.clone().unwrap();
-                            publisher.send(WriterMessage::Queue(QueueResponse::Puback(
-                                variable.message_id,
+                        if !subscribers.is_empty() && packet.fixed.qos == 1 {
+                            let publisher = publisher.clone();
+                            publisher.send(WriterMessage::Queue(MqttPacket::Puback(
+                                ConfirmationPacket {
+                                    fixed: FixedHeader::for_type(PacketType::Puback),
+                                    length: 0,
+                                    // since the packet has qos 1 we trust that it
+                                    // would not get parsed without a message_id
+                                    message_id: packet.message_id.unwrap(),
+                                    puback_reason_code: Some(PubackPubrecCode::Success),
+                                    pubcomp_reason_code: None,
+                                    properties: None,
+                                },
                             )));
                         }
                     }
-                    QueueRequest::Subscribe(sub) => {
-                        subscribers.push(sub.clone());
+                    QueueRequest::Subscribe(matching, packet, writer) => {
+                        let sub = &packet.subscriptions[*matching];
+                        subscribers.push((sub.clone(), writer.clone()));
                         // send retained message on new subscription
                         if let Some((message_id, payload)) = &retained_msg {
-                            sub.process
-                                .send(WriterMessage::Queue(QueueResponse::Publish(
-                                    *message_id,
-                                    name.clone(),
-                                    payload.to_string(),
-                                    0,
-                                )))
+                            writer.send(WriterMessage::Queue(MqttPacket::Publish(PublishPacket {
+                                fixed: FixedHeader::for_type(PacketType::Publish),
+                                message_id: *message_id,
+                                length: 0,
+                                properties: None,
+                                payload: payload.clone(),
+                                topic: name.clone(),
+                            })))
                         }
                     }
-                    QueueRequest::Unsubscribe(id) => {
-                        subscribers.retain(|sub| sub.client_id != *id);
+                    QueueRequest::Unsubscribe(unsub) => {
+                        subscribers.retain(|(_, writer)| writer.id() != unsub.id());
                     }
                 }
             }

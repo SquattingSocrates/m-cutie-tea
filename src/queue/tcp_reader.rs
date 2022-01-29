@@ -1,166 +1,224 @@
 use lunatic::{
     net,
     process::{self, Process},
-    Mailbox, Request,
+    Mailbox, ReceiveError,
 };
 use std::collections::HashMap;
-use std::io::prelude::*;
-use std::io::BufReader;
 
-use crate::mqtt::{message::MqttMessage, parser::ByteParser};
-use crate::structure::{
-    BrokerRequest, BrokerResponse, ConnectionMessage, Queue, QueueRequest, QueueResponse,
-    SessionConfig, SessionRequest, WriterMessage,
+use crate::structure::*;
+use mqtt_packet_3_5::{
+    ConnectPacket, FixedHeader, MqttCode, MqttPacket, PacketDecoder, PacketType, PingrespPacket,
+    PublishPacket, SubackPacket, SubscribePacket, SubscriptionReasonCode,
 };
 
+struct ConnectionHelper {
+    broker: BrokerProcess,
+    pub_queues: HashMap<String, Queue>,
+    writer_process: WriterProcess,
+    connect_packet: ConnectPacket,
+    pub reader: PacketDecoder<net::TcpStream>,
+    pub is_receiving: bool,
+}
+
+impl ConnectionHelper {
+    pub fn new(
+        broker: BrokerProcess,
+        writer_process: WriterProcess,
+        stream: net::TcpStream,
+        connect_packet: ConnectPacket,
+    ) -> ConnectionHelper {
+        ConnectionHelper {
+            broker,
+            pub_queues: HashMap::new(),
+            reader: PacketDecoder::from_stream(stream),
+            connect_packet,
+            writer_process,
+            is_receiving: true,
+        }
+    }
+
+    pub fn publish(&mut self, packet: PublishPacket) {
+        let writer = self.writer_process.clone();
+        let queue = self.ensure_queue(packet.clone());
+        queue.process.send(QueueRequest::Publish(packet, writer));
+    }
+
+    fn ensure_queue(&mut self, packet: PublishPacket) -> &Queue {
+        self.pub_queues
+            .entry(packet.topic.clone())
+            .or_insert_with(|| {
+                match self
+                    .broker
+                    .request(BrokerRequest::GetQueue(packet.topic))
+                    .unwrap()
+                {
+                    BrokerResponse::MatchingQueue(q) => q,
+                    x => {
+                        eprintln!("Broker responded with non-queue response: {:?}", x);
+                        panic!("Broker messed up");
+                    }
+                }
+            })
+    }
+
+    pub fn use_new_stream(&mut self, stream: net::TcpStream, packet: ConnectPacket) {
+        self.reader = PacketDecoder::from_stream(stream.clone());
+        self.is_receiving = true;
+        self.connect_packet = packet;
+        self.writer_process.send(WriterMessage::Connection(
+            ConnectionMessage::Connect(0x0),
+            Some(stream),
+        ));
+    }
+
+    pub fn read(&mut self) -> Result<MqttPacket, String> {
+        self.reader
+            .decode_packet(self.connect_packet.protocol_version)
+    }
+
+    pub fn subscribe(&mut self, sub: SubscribePacket) {
+        let is_v5 = self.connect_packet.protocol_version == 5;
+        match self.broker.request(BrokerRequest::Subscribe(
+            sub.clone(),
+            self.writer_process.clone(),
+        )) {
+            Ok(data) => {
+                println!("RESPONSE FROM BROKER ON SUBSCRIBE {:?}", data);
+                self.writer_process
+                    .send(WriterMessage::Queue(MqttPacket::Suback(SubackPacket {
+                        fixed: FixedHeader::for_type(PacketType::Suback),
+                        length: 0,
+                        message_id: sub.message_id,
+                        properties: None,
+                        reason_code: Some(0),
+                        granted_reason_codes: if is_v5 {
+                            sub.subscriptions
+                                .iter()
+                                .map(|x| {
+                                    SubscriptionReasonCode::from_byte(x.qos.to_byte())
+                                        .unwrap_or(SubscriptionReasonCode::UnspecifiedError)
+                                })
+                                .collect()
+                        } else {
+                            vec![]
+                        },
+                        granted_qos: if is_v5 {
+                            vec![]
+                        } else {
+                            sub.subscriptions.iter().map(|x| x.qos.clone()).collect()
+                        },
+                    })));
+                println!("JUST SENT TO WRITER");
+            }
+            Err(e) => {
+                eprintln!("Failed to subscribe: {}", e);
+            }
+        }
+    }
+
+    pub fn wait_for_reconnect(&mut self, msg: Result<SessionRequest, ReceiveError>) -> bool {
+        match msg {
+            Ok(SessionRequest::Create(new_stream, connect_packet)) => {
+                println!("RECEIVED RECONN IN MAILBOX");
+                self.use_new_stream(new_stream, connect_packet);
+                false
+            }
+            Ok(SessionRequest::Destroy) => {
+                self.writer_process
+                    .send(WriterMessage::Connection(ConnectionMessage::Destroy, None));
+                true
+            }
+            Err(e) => {
+                eprintln!("Error while receiving new stream {:?}", e);
+                false
+            }
+        }
+    }
+
+    pub fn handle_connect(&mut self, packet: ConnectPacket, reader: Process<SessionRequest>) {
+        let client_id = packet.client_id.clone();
+        self.connect_packet = packet;
+        if let BrokerResponse::Registered = self
+            .broker
+            .request(BrokerRequest::RegisterSession(client_id, reader))
+            .unwrap()
+        {
+            self.writer_process.send(WriterMessage::Connection(
+                ConnectionMessage::Connect(0),
+                None,
+            ))
+        }
+    }
+
+    pub fn pong(&mut self) {
+        self.writer_process
+            .send(WriterMessage::Queue(MqttPacket::Pingresp(PingrespPacket {
+                fixed: FixedHeader::for_type(PacketType::Pingresp),
+            })))
+    }
+
+    pub fn disconnect(&mut self) {
+        self.writer_process.send(WriterMessage::Connection(
+            ConnectionMessage::Disconnect,
+            None,
+        ))
+    }
+}
+
 pub fn handle_tcp(
-    (mut client_id, writer_process, mut stream, broker): (
+    (mut client_id, writer_process, mut stream, broker, connect_packet): (
         String,
         Process<WriterMessage>,
         net::TcpStream,
-        Process<Request<BrokerRequest, BrokerResponse>>,
+        BrokerProcess,
+        ConnectPacket,
     ),
     mailbox: Mailbox<SessionRequest>,
 ) {
     // controls whether data is read from tcp_stream
-    let mut is_receiving = true;
     let this = process::this(&mailbox);
-    let mut pub_queues: HashMap<String, Queue> = HashMap::new();
+    let mut state = ConnectionHelper::new(broker, writer_process, stream, connect_packet);
     loop {
-        if !is_receiving {
+        if !state.is_receiving {
             println!(
                 "Waiting for mailbox in tcp_reader. is_receiving: {}",
-                is_receiving
+                state.is_receiving
             );
-            match mailbox.receive() {
-                Ok(new_stream) => match new_stream {
-                    SessionRequest::Create(SessionConfig {
-                        stream: new_stream, ..
-                    }) => {
-                        println!("RECEIVED RECONN IN MAILBOX");
-                        stream = new_stream;
-                        is_receiving = true;
-                        writer_process.send(WriterMessage::Connection(
-                            ConnectionMessage::Connect(0x0),
-                            Some(stream.clone()),
-                        ));
-                        continue;
-                    }
-                    SessionRequest::Destroy => {
-                        writer_process
-                            .send(WriterMessage::Connection(ConnectionMessage::Destroy, None));
-                        return;
-                    }
-                },
-                Err(e) => {
-                    eprintln!("Error while receiving new stream {:?}", e);
-                    continue;
-                }
+            if let true = state.wait_for_reconnect(mailbox.receive()) {
+                println!("Terminating process");
+                return;
             }
+            continue;
         }
 
-        let mut reader = BufReader::new(&mut stream);
         println!(
             "Waiting for fill_buf in tcp_reader. is_receiving: {}",
-            is_receiving
+            state.is_receiving
         );
-        match reader.fill_buf() {
+        match state.read() {
             Ok(v) => {
-                let vc = v.to_vec();
-                if vc.is_empty() {
-                    // if vec is empty, the underlying stream is closed
-                    is_receiving = false;
-                    continue;
-                }
-                println!("RAW {:?}", vc);
-                let mut parser = ByteParser::new(vc);
-                // let mut cursor = 0usize;
-                match parser.parse_mqtt() {
-                    Ok(msg) => {
-                        match &msg {
-                            // handle authentication and session creation
-                            MqttMessage::Connect(_, _, payload) => {
-                                client_id = payload.client_id.clone();
-                                if let BrokerResponse::Registered = broker
-                                    .request(BrokerRequest::RegisterSession(
-                                        client_id.clone(),
-                                        this.clone(),
-                                    ))
-                                    .unwrap()
-                                {
-                                    writer_process.send(WriterMessage::Connection(
-                                        ConnectionMessage::Connect(0),
-                                        None,
-                                    ))
-                                }
-                            }
-                            MqttMessage::Disconnect(_) => writer_process.send(
-                                WriterMessage::Connection(ConnectionMessage::Disconnect, None),
-                            ),
-                            MqttMessage::Pingreq(_) => writer_process
-                                .send(WriterMessage::Connection(ConnectionMessage::Ping, None)),
-                            // handle queue messages
-                            MqttMessage::Publish(fixed, variable, payload) => {
-                                let queue = pub_queues
-                                    .entry(variable.topic_name.clone())
-                                    .or_insert_with(|| {
-                                        match broker
-                                            .request(BrokerRequest::GetQueue(
-                                                variable.topic_name.clone(),
-                                            ))
-                                            .unwrap()
-                                        {
-                                            BrokerResponse::MatchingQueue(q) => q,
-                                            x => {
-                                                eprintln!("Broker responded with non-queue response: {:?}", x);
-                                                panic!("Broker messed up");
-                                            }
-                                        }
-                                    });
-                                queue.process.send(QueueRequest::Publish(
-                                    fixed.clone(),
-                                    variable.clone(),
-                                    payload.clone(),
-                                    if fixed.qos == 0 {
-                                        None
-                                    } else {
-                                        Some(writer_process.clone())
-                                    },
-                                ));
-                            }
-                            MqttMessage::Subscribe(_, variable, subs) => {
-                                match broker.request(BrokerRequest::Subscribe(
-                                    client_id.clone(),
-                                    subs.to_vec(),
-                                    writer_process.clone(),
-                                )) {
-                                    Ok(data) => {
-                                        println!("RESPONSE FROM BROKER ON SUBSCRIBE {:?}", data);
-                                        writer_process.send(WriterMessage::Queue(
-                                            QueueResponse::Subscribe(
-                                                variable.message_id,
-                                                subs.to_vec(),
-                                            ),
-                                        ))
-                                    }
-                                    Err(e) => {
-                                        eprintln!("Failed to subscribe {:?}. Error: {}", subs, e);
-                                    }
-                                }
-                            }
-                            _ => {
-                                println!("received message: {:?}", msg);
-                            }
-                        }
+                match v {
+                    // handle authentication and session creation
+                    MqttPacket::Connect(connect_packet) => {
+                        state.handle_connect(connect_packet, this.clone())
                     }
-                    Err(e) => {
-                        eprintln!("Failed to parse mqtt message: {:?}", e);
+                    MqttPacket::Disconnect(_) => state.disconnect(),
+                    MqttPacket::Pingreq(_) => state.pong(),
+                    // handle queue messages
+                    MqttPacket::Publish(packet) => state.publish(packet),
+                    MqttPacket::Subscribe(packet) => state.subscribe(packet),
+                    msg => {
+                        println!("received message: {:?}", msg);
                     }
                 }
             }
             Err(e) => {
-                println!("Error while filling buffer {:?}", e);
-                is_receiving = false;
+                println!("Error while decoding packet {:?}", e);
+                if e.contains("kind: UnexpectedEof") {
+                    println!("Exiting process...");
+                    // state.close_writer();
+                    return;
+                }
             }
         }
     }

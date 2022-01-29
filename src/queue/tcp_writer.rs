@@ -1,30 +1,72 @@
-use crate::{
-    mqtt::{flags::ControlPacketType, message::MqttMessage},
-    structure::{ConnectionMessage, QueueResponse, WriterMessage},
-};
+use crate::structure::{ConnectionMessage, WriterMessage};
 use lunatic::{net, Mailbox};
+use mqtt_packet_3_5::{
+    ConnackPacket, ConnectPacket, FixedHeader, MqttPacket, PacketEncoder, PacketType, PublishPacket,
+};
 use std::io::Write;
 
-fn serialize_connection_message<'a>(msg: &ConnectionMessage) -> (bool, Vec<u8>) {
-    match &msg {
-        // handle disconnect by disabling writing to tcp stream
-        ConnectionMessage::Disconnect => (false, vec![]),
-        ConnectionMessage::Connect(code) => (
-            true,
-            vec![ControlPacketType::CONNACK.bits() << 4, 0x2, 0x0, *code],
-        ),
-        // TODO: ping should have data about keep-alive, not always true here
-        ConnectionMessage::Ping => (true, vec![(ControlPacketType::PINGRESP.bits() << 4), 0x0]),
-        _ => (false, vec![]),
+pub struct TcpWriter {
+    pub is_receiving: bool,
+    stream: net::TcpStream,
+    qos_1_buf: Vec<PublishPacket>,
+    qos_2_buf: Vec<PublishPacket>,
+    connect_packet: ConnectPacket,
+}
+
+impl TcpWriter {
+    pub fn new(stream: net::TcpStream, connect_packet: ConnectPacket) -> TcpWriter {
+        TcpWriter {
+            stream,
+            connect_packet,
+            is_receiving: true,
+            qos_1_buf: vec![],
+            qos_2_buf: vec![],
+        }
+    }
+
+    pub fn use_new_stream(&mut self, stream: Option<net::TcpStream>) {
+        self.stream = stream.unwrap();
+        let protocol_version = self.connect_packet.protocol_version;
+        let connack = ConnackPacket {
+            fixed: FixedHeader::for_type(PacketType::Connack),
+            length: 0,
+            properties: None,
+            reason_code: if protocol_version == 5 { Some(0) } else { None },
+            return_code: if protocol_version != 5 { Some(0) } else { None },
+            session_present: false,
+        };
+        match PacketEncoder::encode_packet(MqttPacket::Connack(connack), protocol_version) {
+            Ok(buf) => self.write_buf(buf),
+            Err(e) => eprintln!("Failed to encode connack message {:?}", e),
+        }
+    }
+
+    fn write_buf(&mut self, buf: Vec<u8>) {
+        match self.stream.write_all(&buf) {
+            Ok(_) => println!("Wrote connection response to client"),
+            Err(e) => {
+                eprintln!("Failed to write connection response to stream {:?}", e)
+            }
+        };
+    }
+
+    pub fn write_packet(&mut self, packet: MqttPacket) {
+        match PacketEncoder::encode_packet(packet, self.connect_packet.protocol_version) {
+            Ok(buf) => self.write_buf(buf),
+            Err(e) => eprintln!("Failed to encode message {:?}", e),
+        }
     }
 }
 
 // This process has a one mailbox that it's listening to
 // but there can be multiple types of messages
-pub fn write_mqtt(mut stream: net::TcpStream, mailbox: Mailbox<WriterMessage>) {
-    let mut is_receiving = true;
+pub fn write_mqtt(
+    (stream, connect_packet): (net::TcpStream, ConnectPacket),
+    mailbox: Mailbox<WriterMessage>,
+) {
+    let mut state = TcpWriter::new(stream, connect_packet);
     loop {
-        println!("WRITER IS RECEIVING {}", is_receiving);
+        println!("WRITER IS RECEIVING {}", state.is_receiving);
         match mailbox.receive() {
             Ok(data) => match &data {
                 WriterMessage::Connection(msg, maybe_stream) => {
@@ -33,89 +75,12 @@ pub fn write_mqtt(mut stream: net::TcpStream, mailbox: Mailbox<WriterMessage>) {
                         return;
                     }
                     println!("Received WriterMessage::Connection {:?}", msg);
-                    let stuff = maybe_stream.is_some();
-                    if stuff {
-                        stream = maybe_stream.as_ref().unwrap().clone();
-                    }
-                    let (receiving, res) = serialize_connection_message(msg);
-                    is_receiving = receiving;
-                    match stream.write_all(&res) {
-                        Ok(_) => println!("Wrote connection response to client"),
-                        Err(e) => {
-                            eprintln!("Failed to write connection response to stream {:?}", e)
-                        }
-                    };
+                    state.use_new_stream(maybe_stream.clone());
                 }
-                WriterMessage::Queue(s) => match &s {
-                    QueueResponse::Publish(message_id, _, blob, _) => {
-                        // TODO: buffer messages with qos > 0
-                        if !is_receiving {
-                            continue;
-                        }
-                        // let flag = ControlPacketType::PUBLISH;
-                        let res = MqttMessage::bytes_with_message_id(
-                            ControlPacketType::PUBLISH.bits(),
-                            *message_id,
-                            Some(String::into_bytes(blob.to_string())),
-                        );
-                        match stream.write_all(&res) {
-                            Ok(_) => println!("Wrote publish to client"),
-                            Err(e) => {
-                                eprintln!("Failed to write publish to stream {:?}", e)
-                            }
-                        };
-                    }
-                    QueueResponse::Subscribe(message_id, subs) => {
-                        if !is_receiving {
-                            continue;
-                        }
-                        let res = MqttMessage::bytes_with_message_id(
-                            ControlPacketType::SUBACK.bits(),
-                            *message_id,
-                            Some(subs.iter().map(|x| x.qos).collect()),
-                        );
-                        match stream.write_all(&res) {
-                            Ok(_) => println!("Wrote suback to client"),
-                            Err(e) => {
-                                eprintln!("Failed to write suback to stream {:?}", e)
-                            }
-                        };
-                    }
-                    QueueResponse::Unsubscribe(message_id, _) => {
-                        if !is_receiving {
-                            continue;
-                        }
-                        let message_id = MqttMessage::encode_multibyte_num(*message_id);
-                        match stream.write_all(&[
-                            (ControlPacketType::UNSUBACK.bits() << 4) + 0x2,
-                            0x2,
-                            message_id[0],
-                            message_id[1],
-                        ]) {
-                            Ok(_) => println!("Wrote suback to client"),
-                            Err(e) => {
-                                eprintln!("Failed to write suback to stream {:?}", e)
-                            }
-                        };
-                    }
-                    QueueResponse::Puback(message_id) => {
-                        // TODO: maybe handle publisher losing connection?
-                        if !is_receiving {
-                            continue;
-                        }
-                        let res = MqttMessage::bytes_with_message_id(
-                            ControlPacketType::PUBACK.bits(),
-                            *message_id,
-                            None,
-                        );
-                        match stream.write_all(&res) {
-                            Ok(_) => println!("Wrote publish to client"),
-                            Err(e) => {
-                                eprintln!("Failed to write publish to stream {:?}", e)
-                            }
-                        };
-                    }
-                },
+                WriterMessage::Queue(packet) => {
+                    println!("GOT QUEUE MESSAGE {:?}", packet);
+                    state.write_packet(packet.clone());
+                }
             },
             Err(e) => {
                 eprintln!("Failed to receive mailbox {:?}", e);

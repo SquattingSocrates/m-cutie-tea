@@ -1,29 +1,31 @@
-use crate::mqtt::message::{
-    ConnectPayload, ConnectVariableHeader, FixedHeader, PublishVariableHeader, SubscriptionRequest,
-};
-use lunatic::{net, process::Process};
+use lunatic::{net, process::Process, Request};
+use mqtt_packet_3_5::{ConnectPacket, MqttPacket, PublishPacket, SubscribePacket};
 use serde::{Deserialize, Serialize};
 
-use crate::{Blob, MessageID, QoS, Topic};
+pub type WriterProcess = Process<WriterMessage>;
+pub type ReaderProcess = Process<SessionRequest>;
+pub type BrokerProcess = Process<Request<BrokerRequest, BrokerResponse>>;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum QueueRequest {
-    Publish(
-        FixedHeader,
-        PublishVariableHeader,
-        Blob,
-        Option<Process<WriterMessage>>,
-    ),
-    Subscribe(Subscription),
-    Unsubscribe(String),
+    /// WriterProcess is necessary for sending responses like Puback, Pubrel etc
+    Publish(PublishPacket, WriterProcess),
+    /// Send Matching subscription index as well as the subscribe packet and
+    /// writer process
+    Subscribe(usize, SubscribePacket, WriterProcess),
+    /// Send only client_id
+    Unsubscribe(WriterProcess),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum BrokerRequest {
-    GetQueue(Topic),
-    Subscribe(String, Vec<SubscriptionRequest>, Process<WriterMessage>),
-    RegisterSession(String, Process<SessionRequest>),
-    HasProcess(String),
+    /// Request Queue Process for publishing by topic name
+    GetQueue(String),
+    Subscribe(SubscribePacket, Process<WriterMessage>),
+    MoveToExistingSession(SessionConfig),
+    /// Receives client_id and registers new Process
+    RegisterSession(String, ReaderProcess),
+    DestroySession(String),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -34,27 +36,10 @@ pub enum BrokerResponse {
     ExistingSession(Option<Process<SessionRequest>>),
 }
 
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
-pub struct Subscription {
-    pub client_id: String,
-    // topic: String,
-    // All channels that the client joined
-    pub process: Process<WriterMessage>,
-    pub qos: u8,
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Queue {
     pub name: String,
     pub process: Process<QueueRequest>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub enum QueueResponse {
-    Publish(MessageID, Topic, Blob, QoS),
-    Subscribe(MessageID, Vec<SubscriptionRequest>),
-    Unsubscribe(MessageID, Vec<Topic>),
-    Puback(MessageID),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -67,19 +52,18 @@ pub enum ConnectionMessage {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum WriterMessage {
-    Queue(QueueResponse),
+    Queue(MqttPacket),
     Connection(ConnectionMessage, Option<net::TcpStream>),
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SessionConfig {
     pub stream: net::TcpStream,
-    pub variable_header: ConnectVariableHeader,
-    pub payload: ConnectPayload,
+    pub connect_packet: ConnectPacket,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum SessionRequest {
-    Create(SessionConfig),
+    Create(net::TcpStream, ConnectPacket),
     Destroy,
 }
