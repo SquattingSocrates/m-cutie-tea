@@ -65,7 +65,7 @@ impl ConnectionHelper {
         self.reader = PacketDecoder::from_stream(stream.clone());
         self.is_receiving = true;
         self.connect_packet = packet;
-        self.writer_process.send(WriterMessage::Connection(
+        self.writer_process.request(WriterMessage::Connection(
             ConnectionMessage::Connect(0x0),
             Some(stream),
         ));
@@ -85,7 +85,7 @@ impl ConnectionHelper {
             Ok(data) => {
                 println!("RESPONSE FROM BROKER ON SUBSCRIBE {:?}", data);
                 self.writer_process
-                    .send(WriterMessage::Queue(MqttPacket::Suback(SubackPacket {
+                    .request(WriterMessage::Queue(MqttPacket::Suback(SubackPacket {
                         fixed: FixedHeader::for_type(PacketType::Suback),
                         length: 0,
                         message_id: sub.message_id,
@@ -125,7 +125,7 @@ impl ConnectionHelper {
             }
             Ok(SessionRequest::Destroy) => {
                 self.writer_process
-                    .send(WriterMessage::Connection(ConnectionMessage::Destroy, None));
+                    .request(WriterMessage::Connection(ConnectionMessage::Destroy, None));
                 true
             }
             Err(e) => {
@@ -143,32 +143,32 @@ impl ConnectionHelper {
             .request(BrokerRequest::RegisterSession(client_id, reader))
             .unwrap()
         {
-            self.writer_process.send(WriterMessage::Connection(
+            self.writer_process.request(WriterMessage::Connection(
                 ConnectionMessage::Connect(0),
                 None,
-            ))
+            ));
         }
     }
 
     pub fn pong(&mut self) {
         self.writer_process
-            .send(WriterMessage::Queue(MqttPacket::Pingresp(PingrespPacket {
+            .request(WriterMessage::Queue(MqttPacket::Pingresp(PingrespPacket {
                 fixed: FixedHeader::for_type(PacketType::Pingresp),
-            })))
+            })));
     }
 
     pub fn disconnect(&mut self) {
-        self.writer_process.send(WriterMessage::Connection(
+        self.writer_process.request(WriterMessage::Connection(
             ConnectionMessage::Disconnect,
             None,
-        ))
+        ));
     }
 }
 
 pub fn handle_tcp(
     (mut client_id, writer_process, mut stream, broker, connect_packet): (
         String,
-        Process<WriterMessage>,
+        WriterProcess,
         net::TcpStream,
         BrokerProcess,
         ConnectPacket,
@@ -197,6 +197,7 @@ pub fn handle_tcp(
         );
         match state.read() {
             Ok(v) => {
+                println!("READ PACKET {:?}", v);
                 match v {
                     // handle authentication and session creation
                     MqttPacket::Connect(connect_packet) => {

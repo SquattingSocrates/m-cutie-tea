@@ -1,5 +1,5 @@
-use crate::structure::{ConnectionMessage, WriterMessage};
-use lunatic::{net, Mailbox};
+use crate::structure::{ConnectionMessage, WriterMessage, WriterResponse};
+use lunatic::{net, Mailbox, Request};
 use mqtt_packet_3_5::{
     ConnackPacket, ConnectPacket, FixedHeader, MqttPacket, PacketEncoder, PacketType, PublishPacket,
 };
@@ -62,26 +62,29 @@ impl TcpWriter {
 // but there can be multiple types of messages
 pub fn write_mqtt(
     (stream, connect_packet): (net::TcpStream, ConnectPacket),
-    mailbox: Mailbox<WriterMessage>,
+    mailbox: Mailbox<Request<WriterMessage, WriterResponse>>,
 ) {
     let mut state = TcpWriter::new(stream, connect_packet);
     loop {
         println!("WRITER IS RECEIVING {}", state.is_receiving);
         match mailbox.receive() {
-            Ok(data) => match &data {
-                WriterMessage::Connection(msg, maybe_stream) => {
-                    if let ConnectionMessage::Destroy = msg {
-                        println!("Destroying old tcp_writer process");
-                        return;
+            Ok(msg) => {
+                match msg.data() {
+                    WriterMessage::Connection(msg, maybe_stream) => {
+                        if let ConnectionMessage::Destroy = msg {
+                            println!("Destroying old tcp_writer process");
+                            return;
+                        }
+                        println!("Received WriterMessage::Connection {:?}", msg);
+                        state.use_new_stream(maybe_stream.clone());
                     }
-                    println!("Received WriterMessage::Connection {:?}", msg);
-                    state.use_new_stream(maybe_stream.clone());
+                    WriterMessage::Queue(packet) => {
+                        println!("GOT QUEUE MESSAGE {:?}", packet);
+                        state.write_packet(packet.clone());
+                    }
                 }
-                WriterMessage::Queue(packet) => {
-                    println!("GOT QUEUE MESSAGE {:?}", packet);
-                    state.write_packet(packet.clone());
-                }
-            },
+                msg.reply(WriterResponse::Published)
+            }
             Err(e) => {
                 eprintln!("Failed to receive mailbox {:?}", e);
             }

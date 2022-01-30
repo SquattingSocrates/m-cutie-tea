@@ -53,7 +53,7 @@ pub fn connect_client(mut stream: net::TcpStream, mailbox: Mailbox<SessionReques
     // MUST set Session Present to 0 in the CONNACK packet in addition to
     // setting a 0x00 (Success) Reason Code in the CONNACK packet
     let is_v5 = connect_packet.protocol_version == 5;
-    writer_process.send(WriterMessage::Queue(MqttPacket::Connack({
+    writer_process.request(WriterMessage::Queue(MqttPacket::Connack({
         ConnackPacket {
             fixed: FixedHeader::for_type(PacketType::Connack),
             length: 0,

@@ -2,7 +2,7 @@ use lunatic::{net, process::Process, Request};
 use mqtt_packet_3_5::{ConnectPacket, MqttPacket, PublishPacket, SubscribePacket};
 use serde::{Deserialize, Serialize};
 
-pub type WriterProcess = Process<WriterMessage>;
+pub type WriterProcess = Process<Request<WriterMessage, WriterResponse>>;
 pub type ReaderProcess = Process<SessionRequest>;
 pub type BrokerProcess = Process<Request<BrokerRequest, BrokerResponse>>;
 
@@ -21,7 +21,7 @@ pub enum QueueRequest {
 pub enum BrokerRequest {
     /// Request Queue Process for publishing by topic name
     GetQueue(String),
-    Subscribe(SubscribePacket, Process<WriterMessage>),
+    Subscribe(SubscribePacket, WriterProcess),
     MoveToExistingSession(SessionConfig),
     /// Receives client_id and registers new Process
     RegisterSession(String, ReaderProcess),
@@ -54,6 +54,11 @@ pub enum ConnectionMessage {
 pub enum WriterMessage {
     Queue(MqttPacket),
     Connection(ConnectionMessage, Option<net::TcpStream>),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum WriterResponse {
+    Published,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
