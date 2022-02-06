@@ -1,7 +1,8 @@
 use crate::structure::{ConnectionMessage, WriterMessage, WriterResponse};
 use lunatic::{net, Mailbox, Request};
 use mqtt_packet_3_5::{
-    ConnackPacket, ConnectPacket, FixedHeader, MqttPacket, PacketEncoder, PacketType, PublishPacket,
+    ConfirmationPacket, ConnackPacket, ConnectPacket, FixedHeader, MqttPacket, Packet, PacketType,
+    PingrespPacket, PubackPubrecCode, PublishPacket, UnsubackCode, UnsubackPacket,
 };
 use std::io::Write;
 
@@ -28,14 +29,12 @@ impl TcpWriter {
         self.stream = stream.unwrap();
         let protocol_version = self.connect_packet.protocol_version;
         let connack = ConnackPacket {
-            fixed: FixedHeader::for_type(PacketType::Connack),
-            length: 0,
             properties: None,
             reason_code: if protocol_version == 5 { Some(0) } else { None },
             return_code: if protocol_version != 5 { Some(0) } else { None },
             session_present: false,
         };
-        match PacketEncoder::encode_packet(MqttPacket::Connack(connack), protocol_version) {
+        match connack.encode(protocol_version) {
             Ok(buf) => self.write_buf(buf),
             Err(e) => eprintln!("Failed to encode connack message {:?}", e),
         }
@@ -51,7 +50,7 @@ impl TcpWriter {
     }
 
     pub fn write_packet(&mut self, packet: MqttPacket) {
-        match PacketEncoder::encode_packet(packet, self.connect_packet.protocol_version) {
+        match packet.encode(self.connect_packet.protocol_version) {
             Ok(buf) => self.write_buf(buf),
             Err(e) => eprintln!("Failed to encode message {:?}", e),
         }
@@ -66,24 +65,78 @@ pub fn write_mqtt(
 ) {
     let mut state = TcpWriter::new(stream, connect_packet);
     loop {
-        println!("WRITER IS RECEIVING {}", state.is_receiving);
+        println!(
+            "[Writer {}] WRITER IS RECEIVING {}",
+            state.connect_packet.client_id, state.is_receiving
+        );
         match mailbox.receive() {
             Ok(msg) => {
+                let mut response = WriterResponse::Success;
                 match msg.data() {
-                    WriterMessage::Connection(msg, maybe_stream) => {
-                        if let ConnectionMessage::Destroy = msg {
-                            println!("Destroying old tcp_writer process");
-                            return;
-                        }
-                        println!("Received WriterMessage::Connection {:?}", msg);
-                        state.use_new_stream(maybe_stream.clone());
+                    WriterMessage::Connack(packet) => {
+                        state.write_packet(MqttPacket::Connack(packet.clone()));
                     }
-                    WriterMessage::Queue(packet) => {
-                        println!("GOT QUEUE MESSAGE {:?}", packet);
-                        state.write_packet(packet.clone());
+                    WriterMessage::Suback(packet) => {
+                        state.write_packet(MqttPacket::Suback(packet.clone()));
+                    }
+                    WriterMessage::Unsuback(message_id) => {
+                        state.write_packet(MqttPacket::Unsuback(UnsubackPacket {
+                            message_id: *message_id,
+                            granted: vec![UnsubackCode::Success],
+                            properties: None,
+                        }));
+                    }
+                    WriterMessage::Publish(data) => {
+                        match state.stream.write_all(data) {
+                            Ok(_) => {
+                                println!(
+                                    "[Writer {}] Wrote publish response to client",
+                                    state.connect_packet.client_id
+                                );
+                                response = WriterResponse::Sent;
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[Writer {}] Failed to write publish response to stream {:?}",
+                                    state.connect_packet.client_id, e
+                                );
+                                response = WriterResponse::Failed;
+                            }
+                        };
+                    }
+                    WriterMessage::Puback(message_id) => {
+                        state.write_packet(MqttPacket::Puback(ConfirmationPacket::puback_v3(
+                            *message_id,
+                            //puback_reason_code: Some(PubackPubrecCode::ImplementationSpecificError),
+                            //pubcomp_reason_code: None,
+                        )));
+                    }
+                    WriterMessage::Pubrec(message_id) => {
+                        state.write_packet(MqttPacket::Pubrec(ConfirmationPacket::pubrec_v3(
+                            *message_id,
+                        )));
+                    }
+                    WriterMessage::Pubcomp(message_id) => {
+                        state.write_packet(MqttPacket::Pubcomp(ConfirmationPacket::pubcomp_v3(
+                            *message_id,
+                        )));
+                    }
+                    WriterMessage::Pong => {
+                        state.write_packet(MqttPacket::Pingresp);
+                    }
+                    WriterMessage::Die => {
+                        println!(
+                            "[Writer {}] Killing TCP_Reader Process",
+                            state.connect_packet.client_id
+                        );
+                        return;
                     }
                 }
-                msg.reply(WriterResponse::Published)
+                println!(
+                    "[Writer {}] WRITER SENDING REPLY {:?}",
+                    state.connect_packet.client_id, response
+                );
+                msg.reply(response)
             }
             Err(e) => {
                 eprintln!("Failed to receive mailbox {:?}", e);

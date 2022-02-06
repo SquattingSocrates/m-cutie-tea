@@ -3,6 +3,15 @@
 version = 3
 
 [[package]]
+name = "archery"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a8da9bc4c4053ee067669762bcaeea6e241841295a2b6c948312dad6ef4cc02"
+dependencies = [
+ "static_assertions",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -63,14 +72,15 @@ dependencies = [
  "mqtt_packet_3_5",
  "nom",
  "num",
+ "rpds",
  "serde",
 ]
 
 [[package]]
 name = "mqtt_packet_3_5"
-version = "0.1.0"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af1ae865f7e334fda6ee051129a146953f2f0fdd3a9b5584045e90a01e8cf832"
+checksum = "37f144b8299075716a07c676553dbff090c4af9d99d6e92f5c4f4992acb0393d"
 dependencies = [
  "serde",
 ]
@@ -202,6 +212,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpds"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4ef5140bcb576bfd6d56cd2de709a7d17851ac1f3805e67fe9d99e42a11821f"
+dependencies = [
+ "archery",
+]
+
+[[package]]
 name = "serde"
 version = "1.0.132"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -220,6 +239,12 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "static_assertions"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "syn"

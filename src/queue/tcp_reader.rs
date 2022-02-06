@@ -38,9 +38,16 @@ impl ConnectionHelper {
     }
 
     pub fn publish(&mut self, packet: PublishPacket) {
+        let protocol_version = self.connect_packet.protocol_version;
+        let client_id = self.connect_packet.client_id.clone();
         let writer = self.writer_process.clone();
         let queue = self.ensure_queue(packet.clone());
-        queue.process.send(QueueRequest::Publish(packet, writer));
+        queue.process.send(QueueRequest::Publish(
+            packet,
+            client_id,
+            writer,
+            protocol_version,
+        ));
     }
 
     fn ensure_queue(&mut self, packet: PublishPacket) -> &Queue {
@@ -54,22 +61,25 @@ impl ConnectionHelper {
                 {
                     BrokerResponse::MatchingQueue(q) => q,
                     x => {
-                        eprintln!("Broker responded with non-queue response: {:?}", x);
+                        eprintln!(
+                            "[Reader {}] Broker responded with non-queue response: {:?}",
+                            self.connect_packet.client_id, x
+                        );
                         panic!("Broker messed up");
                     }
                 }
             })
     }
 
-    pub fn use_new_stream(&mut self, stream: net::TcpStream, packet: ConnectPacket) {
-        self.reader = PacketDecoder::from_stream(stream.clone());
-        self.is_receiving = true;
-        self.connect_packet = packet;
-        self.writer_process.request(WriterMessage::Connection(
-            ConnectionMessage::Connect(0x0),
-            Some(stream),
-        ));
-    }
+    // pub fn use_new_stream(&mut self, stream: net::TcpStream, packet: ConnectPacket) {
+    //     self.reader = PacketDecoder::from_stream(stream.clone());
+    //     self.is_receiving = true;
+    //     self.connect_packet = packet;
+    //     self.writer_process.request(WriterMessage::Connection(
+    //         ConnectionMessage::Connect(0x0),
+    //         Some(stream),
+    //     ));
+    // }
 
     pub fn read(&mut self) -> Result<MqttPacket, String> {
         self.reader
@@ -83,11 +93,13 @@ impl ConnectionHelper {
             self.writer_process.clone(),
         )) {
             Ok(data) => {
-                println!("RESPONSE FROM BROKER ON SUBSCRIBE {:?}", data);
-                self.writer_process
-                    .request(WriterMessage::Queue(MqttPacket::Suback(SubackPacket {
-                        fixed: FixedHeader::for_type(PacketType::Suback),
-                        length: 0,
+                println!(
+                    "[Reader {}] RESPONSE FROM BROKER ON SUBSCRIBE {:?}",
+                    self.connect_packet.client_id, data
+                );
+                let _ = self
+                    .writer_process
+                    .request(WriterMessage::Suback(SubackPacket {
                         message_id: sub.message_id,
                         properties: None,
                         reason_code: Some(0),
@@ -102,13 +114,12 @@ impl ConnectionHelper {
                         } else {
                             vec![]
                         },
-                        granted_qos: if is_v5 {
-                            vec![]
-                        } else {
-                            sub.subscriptions.iter().map(|x| x.qos.clone()).collect()
-                        },
-                    })));
-                println!("JUST SENT TO WRITER");
+                        granted: vec![],
+                    }));
+                println!(
+                    "[Reader {}] JUST SENT TO WRITER",
+                    self.connect_packet.client_id
+                );
             }
             Err(e) => {
                 eprintln!("Failed to subscribe: {}", e);
@@ -116,107 +127,74 @@ impl ConnectionHelper {
         }
     }
 
-    pub fn wait_for_reconnect(&mut self, msg: Result<SessionRequest, ReceiveError>) -> bool {
-        match msg {
-            Ok(SessionRequest::Create(new_stream, connect_packet)) => {
-                println!("RECEIVED RECONN IN MAILBOX");
-                self.use_new_stream(new_stream, connect_packet);
-                false
-            }
-            Ok(SessionRequest::Destroy) => {
-                self.writer_process
-                    .request(WriterMessage::Connection(ConnectionMessage::Destroy, None));
-                true
-            }
-            Err(e) => {
-                eprintln!("Error while receiving new stream {:?}", e);
-                false
-            }
-        }
-    }
-
-    pub fn handle_connect(&mut self, packet: ConnectPacket, reader: Process<SessionRequest>) {
-        let client_id = packet.client_id.clone();
-        self.connect_packet = packet;
-        if let BrokerResponse::Registered = self
-            .broker
-            .request(BrokerRequest::RegisterSession(client_id, reader))
-            .unwrap()
-        {
-            self.writer_process.request(WriterMessage::Connection(
-                ConnectionMessage::Connect(0),
-                None,
-            ));
-        }
-    }
-
     pub fn pong(&mut self) {
-        self.writer_process
-            .request(WriterMessage::Queue(MqttPacket::Pingresp(PingrespPacket {
-                fixed: FixedHeader::for_type(PacketType::Pingresp),
-            })));
+        match self.writer_process.request(WriterMessage::Pong) {
+            Ok(_) => {}
+            Err(e) => eprintln!(
+                "Failed to send pong to writer for client {:?}. Error: {:?}",
+                self.connect_packet.client_id, e
+            ),
+        }
     }
 
     pub fn disconnect(&mut self) {
-        self.writer_process.request(WriterMessage::Connection(
-            ConnectionMessage::Disconnect,
-            None,
-        ));
+        match self.writer_process.request(WriterMessage::Die) {
+            Ok(_) => {}
+            Err(e) => eprintln!(
+                "[Reader {}] Failed to send disconnect to writer. Error: {:?}",
+                self.connect_packet.client_id, e
+            ),
+        }
     }
 }
 
 pub fn handle_tcp(
-    (mut client_id, writer_process, mut stream, broker, connect_packet): (
+    (client_id, writer_process, stream, broker, connect_packet): (
         String,
         WriterProcess,
         net::TcpStream,
         BrokerProcess,
         ConnectPacket,
     ),
-    mailbox: Mailbox<SessionRequest>,
+    _: Mailbox<()>,
 ) {
     // controls whether data is read from tcp_stream
-    let this = process::this(&mailbox);
     let mut state = ConnectionHelper::new(broker, writer_process, stream, connect_packet);
     loop {
-        if !state.is_receiving {
-            println!(
-                "Waiting for mailbox in tcp_reader. is_receiving: {}",
-                state.is_receiving
-            );
-            if let true = state.wait_for_reconnect(mailbox.receive()) {
-                println!("Terminating process");
-                return;
-            }
-            continue;
-        }
-
-        println!(
-            "Waiting for fill_buf in tcp_reader. is_receiving: {}",
-            state.is_receiving
-        );
         match state.read() {
             Ok(v) => {
-                println!("READ PACKET {:?}", v);
+                println!(
+                    "[Reader {}] READ PACKET {:?}",
+                    state.connect_packet.client_id, v
+                );
                 match v {
                     // handle authentication and session creation
-                    MqttPacket::Connect(connect_packet) => {
-                        state.handle_connect(connect_packet, this.clone())
-                    }
+                    // MqttPacket::Connect(connect_packet) => {
+                    //     state.handle_connect(connect_packet, this.clone())
+                    // }
                     MqttPacket::Disconnect(_) => state.disconnect(),
-                    MqttPacket::Pingreq(_) => state.pong(),
+                    MqttPacket::Pingreq => state.pong(),
                     // handle queue messages
                     MqttPacket::Publish(packet) => state.publish(packet),
                     MqttPacket::Subscribe(packet) => state.subscribe(packet),
                     msg => {
-                        println!("received message: {:?}", msg);
+                        println!(
+                            "[Reader {}] received message: {:?}",
+                            state.connect_packet.client_id, msg
+                        );
                     }
                 }
             }
             Err(e) => {
-                println!("Error while decoding packet {:?}", e);
+                println!(
+                    "[Reader {}] Error while decoding packet {:?}",
+                    state.connect_packet.client_id, e
+                );
                 if e.contains("kind: UnexpectedEof") {
-                    println!("Exiting process...");
+                    println!(
+                        "[Reader {}] Exiting process...",
+                        state.connect_packet.client_id
+                    );
                     // state.close_writer();
                     return;
                 }

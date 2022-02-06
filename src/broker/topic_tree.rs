@@ -1,10 +1,12 @@
 use crate::queue::queue::new_queue;
 use crate::structure::*;
 use lunatic::process;
+use mqtt_packet_3_5::QoS;
 
 #[derive(Default)]
 pub struct TopicTree {
     queues: Vec<Queue>,
+    subscriptions: Vec<(u8, u16, String, WriterProcess)>,
 }
 
 #[derive(PartialEq, Debug)]
@@ -127,7 +129,6 @@ impl<'a> Iterator for TopicIter<'a> {
 
 impl State {
     pub fn match_topic(wildcard: &str, topic: &str) -> bool {
-        println!("\n\nMATCHING TOPIC to wildcard: {} | {}", wildcard, topic);
         let mut state = State::Initial;
         let mut w = WildcardIter::new(wildcard);
         let mut t = TopicIter::new(topic);
@@ -240,18 +241,22 @@ impl State {
                 (_, _, _) => return false,
             };
             if state == State::Terminal {
+                println!(
+                    "\n\nMATCHING TOPIC to wildcard: {} | {} | {:?}",
+                    wildcard, topic, state
+                );
                 return true;
             }
         }
+        println!(
+            "\n\nMATCHING TOPIC to wildcard: {} | {} | {:?}",
+            wildcard, topic, false
+        );
         false
     }
 }
 
 impl TopicTree {
-    pub fn new() -> TopicTree {
-        TopicTree { queues: Vec::new() }
-    }
-
     pub fn ensure_topic_queue(&mut self, topic: &str) -> Queue {
         if let Some(found) = self.queues.iter().position(|q| q.name == topic) {
             self.queues.get(found).unwrap().clone()
@@ -262,6 +267,7 @@ impl TopicTree {
             };
             self.queues.push(queue);
             let len = self.queues.len();
+            // add subscribers with matching topics/wildcards
             self.queues.get(len - 1).unwrap().clone()
         }
     }
@@ -288,6 +294,16 @@ impl TopicTree {
         keys.iter()
             .map(|key| self.ensure_topic_queue(key))
             .collect::<Vec<Queue>>()
+    }
+
+    pub fn add_subscriber(
+        &mut self,
+        qos: u8,
+        message_id: u16,
+        topic: String,
+        writer: WriterProcess,
+    ) {
+        self.subscriptions.push((qos, message_id, topic, writer));
     }
 }
 

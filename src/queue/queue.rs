@@ -1,15 +1,18 @@
 use lunatic::Mailbox;
-use std::collections::VecDeque;
+use rpds::Queue as PersistentQueue;
+use std::collections::{HashMap, VecDeque};
 
 use crate::structure::*;
 use mqtt_packet_3_5::{
-    ConfirmationPacket, FixedHeader, MqttPacket, PacketType, PubackPubrecCode, PublishPacket, QoS,
+    ConfirmationPacket, FixedHeader, MqttPacket, Packet, PubackPubrecCode, PublishPacket, QoS,
+    SubackPacket,
 };
 
 pub struct Queue {
     name: String,
-    buf: VecDeque<(WriterProcess, PublishPacket)>,
-    pub subscribers: Vec<(QoS, WriterProcess)>,
+    buf: PersistentQueue<(WriterProcess, Vec<u8>, u16)>,
+    // buf: HashMap<u16, (WriterProcess, Vec<u8>)>,
+    pub subscribers: VecDeque<(u8, WriterProcess)>,
     retained_msg: Option<PublishPacket>,
 }
 
@@ -17,108 +20,158 @@ impl Queue {
     pub fn new(name: &str) -> Queue {
         Queue {
             name: name.to_string(),
-            buf: VecDeque::new(),
+            buf: PersistentQueue::new(),
+            // buf: HashMap::new(),
             retained_msg: None,
-            subscribers: Vec::new(),
+            subscribers: VecDeque::new(),
         }
     }
 
-    pub fn try_flush(&mut self) {
-        println!("TRYING FLUSH {:?} {:?}", self.subscribers, self.buf.len());
-        if self.buf.is_empty() || self.subscribers.is_empty() {
-            return;
-        }
-        println!("GOT SUBSCRIBERS NOW {:?}", self.subscribers);
-        for (publisher, packet) in self.buf.iter() {
-            let packet_qos = packet.fixed.qos;
-            let message_id = packet.message_id;
-            let mut wrote_once = false;
-            for (qos, sub) in self.subscribers.iter() {
-                println!(
-                    "GETTING MESSAGE TO SUBSCRIBERS {:?} {:?} {:?}",
-                    sub,
-                    packet_qos,
-                    qos.to_byte()
-                );
-                // if fixed.retain {
-                //     retained_msg =
-                //         Some((fixed.clone(), variable.message_id, payload.to_string()));
-                // }
-                // handle qos 1 messages - send at least once
-                if packet_qos > qos.to_byte() {
-                    println!(
-                        "Cannot send QoS {} to client who subscribed with QoS {:?}",
-                        packet.fixed.qos, qos
-                    );
-                    continue;
-                }
-                match sub.request(WriterMessage::Queue(MqttPacket::Publish(packet.clone()))) {
-                    Ok(d) => {
-                        println!("\nWROTE MESSAGE TO WRITER\n");
-                        // send puback only once
-                        if !wrote_once && packet_qos == 1 {
-                            // let publisher = publisher.clone().unwrap();
-                            // don't wait for puback
-                            publisher.request(WriterMessage::Queue(MqttPacket::Puback(
-                                ConfirmationPacket {
-                                    fixed: FixedHeader::for_type(PacketType::Puback),
-                                    // since the packet has qos 1 we trust that it
-                                    // would not get parsed without a message_id
-                                    message_id: message_id.unwrap(),
-                                    properties: None,
-                                    length: 0,
-                                    puback_reason_code: Some(PubackPubrecCode::Success),
-                                    pubcomp_reason_code: None,
-                                },
-                            )));
-                        }
-                        wrote_once = true;
-                    }
-                    Err(e) => eprintln!("Failed to write to queue {:?}", e),
-                };
+    pub fn handle_qos0(&mut self, packet: &PublishPacket, protocol_version: u8) {
+        let encoded = packet.encode(protocol_version).unwrap();
+        for (_, sub) in self.subscribers.iter() {
+            if let Err(e) = sub.request(WriterMessage::Publish(encoded.clone())) {
+                eprintln!("Failed to send QoS 0 packet to {:?}. Details: {:?}", sub, e);
             }
         }
-        self.buf = VecDeque::new();
+    }
+
+    pub fn handle_qos1(
+        &mut self,
+        packet: &PublishPacket,
+        publisher: WriterProcess,
+        protocol_version: u8,
+    ) {
+        let encoded = packet.encode(protocol_version).unwrap();
+        // let mut wrote_once = false;
+        let message_id = packet.message_id.unwrap();
+        self.buf = self
+            .buf
+            .enqueue((publisher.clone(), encoded.clone(), message_id));
+        // self.buf.insert(
+        //     message_id,
+        //     (
+        //         publisher.clone(),
+        //         // packet.clone(),
+        //         // since we alread decoded the packet we should be
+        //         // able to encode it too
+        //         encoded.clone(),
+        //     ),
+        // );
+
+        self.send_messages();
+    }
+
+    fn send_messages(&mut self) {
+        println!(
+            "[Queue] subscribers before sending {:?} {:?}",
+            self.subscribers.len(),
+            self.buf.len()
+        );
+        // preempt if no subscribers present
+        if self.subscribers.is_empty() {
+            return;
+        }
+        // let mut to_remove = vec![];
+        // for (message_id, (publisher, packet)) in self.buf.iter() {
+        while !self.buf.is_empty() {
+            if let Some((publisher, packet, message_id)) = self.buf.peek() {
+                let mut puback_sent = false;
+                for _ in 0..self.subscribers.len() {
+                    let (qos, sub) = self.subscribers.pop_front().unwrap();
+                    // if *qos == 0 {
+                    //     continue;
+                    // }
+                    // make sure we write puback once and continue trying to publish
+                    println!("WRITING TO SUB");
+                    if let Ok(WriterResponse::Sent) =
+                        sub.request(WriterMessage::Publish(packet.to_vec()))
+                    {
+                        println!("Sent QoS 1 packet to {:?}", sub);
+                        if let (false, Ok(_)) = (
+                            puback_sent,
+                            publisher.request(WriterMessage::Puback(*message_id)),
+                        ) {
+                            puback_sent = true;
+                            // to_remove.push(sub);
+                            self.subscribers.push_back((qos, sub));
+                        }
+                    } else {
+                        // remove subscriber since it probably disconnected
+                        eprintln!("\nNOT SENT {:?}\n", message_id);
+                    }
+                }
+                if !puback_sent {
+                    continue;
+                }
+                if let Some(queue) = self.buf.dequeue() {
+                    self.buf = queue;
+                }
+            }
+        }
+        println!(
+            "[Queue] subscribers after sending {:?} {:?}",
+            self.subscribers.len(),
+            self.buf.len()
+        );
+        // self.subscribers.filter(|(qos, sub)| !to_remove.contains(&sub));
+    }
+
+    pub fn handle_qos2(
+        &mut self,
+        packet: &PublishPacket,
+        publisher: WriterProcess,
+        protocol_version: u8,
+    ) {
     }
 }
 
 pub fn new_queue(name: String, mailbox: Mailbox<QueueRequest>) {
     let mut q = Queue::new(&name);
     loop {
-        q.try_flush();
+        // q.send_messages();
         match mailbox.receive() {
             Ok(data) => {
                 println!("[Queue {}] Received mqtt message {:?}", name, data);
-                match &data {
-                    QueueRequest::Publish(packet, publisher) => {
+                match data {
+                    QueueRequest::Publish(mut packet, client_id, publisher, protocol_version) => {
                         // QoS 0 - fire and forget
                         println!("SUBSCRIBERS IN LIST: {}", q.subscribers.len());
+                        let orig_qos = packet.qos;
+                        // we want to send a QoS 0 publish to the subscribers
+                        // because we don't want to receive
+                        // packet.qos = 0;
+                        match orig_qos {
+                            0 => q.handle_qos0(&packet, protocol_version),
+                            1 => q.handle_qos1(&packet, publisher, protocol_version),
+                            2 => q.handle_qos2(&packet, publisher, protocol_version),
+                            _ => eprintln!("Should never happen, QoS > 2"),
+                        }
                         // for (sub, proc) in q.subscribers.iter() {
                         //     if packet.fixed.retain {
                         //         retained_msg = Some((packet.message_id, packet.payload.clone()));
                         //     }
                         //     proc.send(WriterMessage::Queue(MqttPacket::Publish(packet.clone())));
                         // }
-                        q.buf.push_back((publisher.clone(), packet.clone()));
                     }
-                    QueueRequest::Subscribe(matching, packet, writer) => {
-                        let sub = &packet.subscriptions[*matching];
-                        q.subscribers.push((sub.qos.clone(), writer.clone()));
+                    QueueRequest::Subscribe(qos, message_id, writer) => {
+                        q.subscribers.push_back((qos, writer.clone()));
                         // send retained message on new subscription
-                        // if let Some((message_id, payload)) = &retained_msg {
-                        //     writer.send(WriterMessage::Queue(MqttPacket::Publish(PublishPacket {
-                        //         fixed: FixedHeader::for_type(PacketType::Publish),
-                        //         message_id: *message_id,
-                        //         length: 0,
-                        //         properties: None,
-                        //         payload: payload.clone(),
-                        //         topic: name.clone(),
-                        //     })))
-                        // }
+                        if let Err(e) = writer.request(WriterMessage::Suback(SubackPacket {
+                            granted: vec![],
+                            granted_reason_codes: vec![],
+                            message_id: message_id,
+                            reason_code: Some(0),
+                            properties: None,
+                        })) {
+                            eprintln!("Failed to write suback: {:?}", e)
+                        } else {
+                            q.send_messages();
+                        }
                     }
                     QueueRequest::Unsubscribe(unsub) => {
-                        q.subscribers
-                            .retain(|(_, writer)| writer.id() != unsub.id());
+                        // q.subscribers
+                        //     .retain(|(_, writer)| writer.id() != unsub.id());
                     }
                 }
             }

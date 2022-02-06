@@ -1,15 +1,14 @@
+pub mod post_office;
 pub mod queue;
 pub mod tcp_reader;
 pub mod tcp_writer;
 
 use lunatic::{lookup, net, process, Mailbox, Request};
 
-use crate::structure::{
-    BrokerRequest, BrokerResponse, SessionConfig, SessionRequest, WriterMessage,
-};
+use crate::structure::{BrokerRequest, BrokerResponse, SessionConfig, WriterMessage};
 use mqtt_packet_3_5::{ConnackPacket, FixedHeader, MqttPacket, PacketDecoder, PacketType};
 
-pub fn connect_client(mut stream: net::TcpStream, mailbox: Mailbox<SessionRequest>) {
+pub fn connect_client(mut stream: net::TcpStream, mailbox: Mailbox<()>) {
     let broker = lookup::<Request<BrokerRequest, BrokerResponse>>("broker", "1.0.0");
     let broker = broker.unwrap().unwrap();
     let this = process::this(&mailbox);
@@ -53,16 +52,12 @@ pub fn connect_client(mut stream: net::TcpStream, mailbox: Mailbox<SessionReques
     // MUST set Session Present to 0 in the CONNACK packet in addition to
     // setting a 0x00 (Success) Reason Code in the CONNACK packet
     let is_v5 = connect_packet.protocol_version == 5;
-    writer_process.request(WriterMessage::Queue(MqttPacket::Connack({
-        ConnackPacket {
-            fixed: FixedHeader::for_type(PacketType::Connack),
-            length: 0,
-            properties: None,
-            reason_code: if is_v5 { Some(0) } else { None },
-            return_code: if !is_v5 { Some(0) } else { None },
-            session_present: false,
-        }
-    })));
+    writer_process.request(WriterMessage::Connack(ConnackPacket {
+        properties: None,
+        reason_code: if is_v5 { Some(0) } else { None },
+        return_code: if !is_v5 { Some(0) } else { None },
+        session_present: false,
+    }));
 
     let _ = process::spawn_with(
         (

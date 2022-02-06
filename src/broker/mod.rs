@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use crate::structure::*;
 use lunatic::{Mailbox, Message, Request, TransformMailbox};
-use mqtt_packet_3_5::SubscribePacket;
+use mqtt_packet_3_5::{QoS, SubscribePacket};
 
 struct Broker {
     subs: TopicTree,
@@ -15,7 +15,7 @@ struct Broker {
 impl Default for Broker {
     fn default() -> Broker {
         Broker {
-            subs: TopicTree::new(),
+            subs: TopicTree::default(),
             clients: HashMap::new(),
         }
     }
@@ -25,7 +25,7 @@ impl Broker {
     pub fn register_session(&mut self, client_id: String, process: ReaderProcess) {
         println!("REGISTERING SESSION {}", client_id);
         if let Some(prev) = self.clients.insert(client_id.to_string(), process.clone()) {
-            prev.send(SessionRequest::Destroy);
+            // prev.send(SessionRequest::Destroy);
         }
     }
 
@@ -37,7 +37,7 @@ impl Broker {
         }: SessionConfig,
     ) -> Option<ReaderProcess> {
         if let Some(process) = self.clients.get(&connect_packet.client_id) {
-            process.send(SessionRequest::Create(stream.clone(), connect_packet));
+            // process.send(SessionRequest::Create(stream.clone(), connect_packet));
             Some(process.clone())
         } else {
             None
@@ -49,11 +49,21 @@ impl Broker {
     }
 
     pub fn subscribe_process(&mut self, packet: SubscribePacket, writer: WriterProcess) {
-        for (idx, sub) in packet.subscriptions.iter().enumerate() {
+        for sub in packet.subscriptions.iter() {
             for q in self.subs.get_matching_queues(&sub.topic) {
-                q.process
-                    .send(QueueRequest::Subscribe(idx, packet.clone(), writer.clone()))
+                q.process.send(QueueRequest::Subscribe(
+                    packet.qos,
+                    packet.message_id,
+                    writer.clone(),
+                ))
             }
+            // store subscription for future topics that match
+            // self.subs.add_subscriber(
+            //     packet.fixed.qos,
+            //     packet.message_id,
+            //     sub.topic.to_string(),
+            //     writer.clone(),
+            // );
         }
     }
 }

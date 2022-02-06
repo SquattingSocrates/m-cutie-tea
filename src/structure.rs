@@ -1,18 +1,20 @@
 use lunatic::{net, process::Process, Request};
-use mqtt_packet_3_5::{ConnectPacket, MqttPacket, PublishPacket, SubscribePacket};
+use mqtt_packet_3_5::{
+    ConnackPacket, ConnectPacket, PublishPacket, QoS, SubackPacket, SubscribePacket,
+};
 use serde::{Deserialize, Serialize};
 
 pub type WriterProcess = Process<Request<WriterMessage, WriterResponse>>;
-pub type ReaderProcess = Process<SessionRequest>;
+pub type ReaderProcess = Process<()>;
 pub type BrokerProcess = Process<Request<BrokerRequest, BrokerResponse>>;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum QueueRequest {
     /// WriterProcess is necessary for sending responses like Puback, Pubrel etc
-    Publish(PublishPacket, WriterProcess),
+    Publish(PublishPacket, String, WriterProcess, u8),
     /// Send Matching subscription index as well as the subscribe packet and
     /// writer process
-    Subscribe(usize, SubscribePacket, WriterProcess),
+    Subscribe(u8, u16, WriterProcess),
     /// Send only client_id
     Unsubscribe(WriterProcess),
 }
@@ -33,7 +35,7 @@ pub enum BrokerResponse {
     MatchingQueue(Queue),
     Subscribed,
     Registered,
-    ExistingSession(Option<Process<SessionRequest>>),
+    ExistingSession(Option<ReaderProcess>),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -52,13 +54,22 @@ pub enum ConnectionMessage {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum WriterMessage {
-    Queue(MqttPacket),
-    Connection(ConnectionMessage, Option<net::TcpStream>),
+    Connack(ConnackPacket),
+    Suback(SubackPacket),
+    Unsuback(u16),
+    Publish(Vec<u8>),
+    Puback(u16),
+    Pubrec(u16),
+    Pubcomp(u16),
+    Pong,
+    Die,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum WriterResponse {
-    Published,
+    Success,
+    Sent,
+    Failed,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -68,7 +79,6 @@ pub struct SessionConfig {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub enum SessionRequest {
-    Create(net::TcpStream, ConnectPacket),
-    Destroy,
+pub enum PostOfficeRequest {
+    Publish(u16, Vec<u8>),
 }
