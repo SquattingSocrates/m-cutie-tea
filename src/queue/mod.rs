@@ -1,4 +1,3 @@
-pub mod post_office;
 pub mod queue;
 pub mod tcp_reader;
 pub mod tcp_writer;
@@ -6,7 +5,7 @@ pub mod tcp_writer;
 use lunatic::{lookup, net, process, Mailbox, Request};
 
 use crate::structure::{BrokerRequest, BrokerResponse, SessionConfig, WriterMessage};
-use mqtt_packet_3_5::{ConnackPacket, FixedHeader, MqttPacket, PacketDecoder, PacketType};
+use mqtt_packet_3_5::{ConnackPacket, MqttPacket, PacketDecoder};
 
 pub fn connect_client(mut stream: net::TcpStream, mailbox: Mailbox<()>) {
     let broker = lookup::<Request<BrokerRequest, BrokerResponse>>("broker", "1.0.0");

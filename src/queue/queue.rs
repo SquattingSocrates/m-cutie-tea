@@ -1,16 +1,50 @@
 use lunatic::Mailbox;
-use rpds::Queue as PersistentQueue;
-use std::collections::{HashMap, VecDeque};
+use queue_file::QueueFile;
+use std::collections::VecDeque;
 
 use crate::structure::*;
-use mqtt_packet_3_5::{
-    ConfirmationPacket, FixedHeader, MqttPacket, Packet, PubackPubrecCode, PublishPacket, QoS,
-    SubackPacket,
-};
+use mqtt_packet_3_5::{Packet, PublishPacket, SubackPacket};
+
+pub struct MessageStore {
+    // queue: QueueFile
+    queue: VecDeque<(WriterProcess, Vec<u8>, u16)>,
+}
+
+impl MessageStore {
+    pub fn new(name: &str) -> MessageStore {
+        // MessageStore {queue: QueueFile::open(name).unwrap()}
+        MessageStore {
+            queue: VecDeque::new(),
+        }
+    }
+
+    pub fn push(&mut self, publisher: WriterProcess, packet: Vec<u8>, message_id: u16) {
+        self.queue.push_back((publisher, packet, message_id))
+        // let mut encoded = Vec::with_capacity(8 + 2 + packet.len());
+        // let mut mask =
+        // self.queue.add(encoded).unwrap();
+    }
+
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    pub fn peek(&self) -> Option<&(WriterProcess, Vec<u8>, u16)> {
+        self.queue.get(0)
+    }
+
+    pub fn poll(&mut self) -> Option<(WriterProcess, Vec<u8>, u16)> {
+        self.queue.pop_front()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+}
 
 pub struct Queue {
     name: String,
-    buf: PersistentQueue<(WriterProcess, Vec<u8>, u16)>,
+    buf: MessageStore,
     // buf: HashMap<u16, (WriterProcess, Vec<u8>)>,
     pub subscribers: VecDeque<(u8, WriterProcess)>,
     retained_msg: Option<PublishPacket>,
@@ -20,7 +54,7 @@ impl Queue {
     pub fn new(name: &str) -> Queue {
         Queue {
             name: name.to_string(),
-            buf: PersistentQueue::new(),
+            buf: MessageStore::new(""),
             // buf: HashMap::new(),
             retained_msg: None,
             subscribers: VecDeque::new(),
@@ -45,19 +79,8 @@ impl Queue {
         let encoded = packet.encode(protocol_version).unwrap();
         // let mut wrote_once = false;
         let message_id = packet.message_id.unwrap();
-        self.buf = self
-            .buf
-            .enqueue((publisher.clone(), encoded.clone(), message_id));
-        // self.buf.insert(
-        //     message_id,
-        //     (
-        //         publisher.clone(),
-        //         // packet.clone(),
-        //         // since we alread decoded the packet we should be
-        //         // able to encode it too
-        //         encoded.clone(),
-        //     ),
-        // );
+        self.buf
+            .push(publisher.clone(), encoded.clone(), message_id);
 
         self.send_messages();
     }
@@ -68,13 +91,14 @@ impl Queue {
             self.subscribers.len(),
             self.buf.len()
         );
-        // preempt if no subscribers present
-        if self.subscribers.is_empty() {
-            return;
-        }
         // let mut to_remove = vec![];
         // for (message_id, (publisher, packet)) in self.buf.iter() {
-        while !self.buf.is_empty() {
+        for _ in 0..self.buf.len() {
+            // preempt if no subscribers present
+            if self.subscribers.is_empty() {
+                return;
+            }
+            println!("IN NON-EMPTY BUF");
             if let Some((publisher, packet, message_id)) = self.buf.peek() {
                 let mut puback_sent = false;
                 for _ in 0..self.subscribers.len() {
@@ -88,24 +112,27 @@ impl Queue {
                         sub.request(WriterMessage::Publish(packet.to_vec()))
                     {
                         println!("Sent QoS 1 packet to {:?}", sub);
+                        // write back subscriber
+                        self.subscribers.push_back((qos, sub));
                         if let (false, Ok(_)) = (
                             puback_sent,
                             publisher.request(WriterMessage::Puback(*message_id)),
                         ) {
                             puback_sent = true;
                             // to_remove.push(sub);
-                            self.subscribers.push_back((qos, sub));
                         }
                     } else {
                         // remove subscriber since it probably disconnected
                         eprintln!("\nNOT SENT {:?}\n", message_id);
                     }
                 }
-                if !puback_sent {
-                    continue;
+                // if no puback was sent but subscribers are not empty,
+                // remove message
+                if !puback_sent && !self.buf.is_empty() {
+                    return;
                 }
-                if let Some(queue) = self.buf.dequeue() {
-                    self.buf = queue;
+                if let None = self.buf.poll() {
+                    eprintln!("[Queue {}] Failed to poll from message store", self.name)
                 }
             }
         }
