@@ -1,70 +1,41 @@
-use lunatic::Mailbox;
-use queue_file::QueueFile;
+use super::message_store::MessageStore;
+use lunatic::{process, Mailbox};
 use std::collections::VecDeque;
 
 use crate::structure::*;
 use mqtt_packet_3_5::{Packet, PublishPacket, SubackPacket};
 
-pub struct MessageStore {
-    // queue: QueueFile
-    queue: VecDeque<(WriterProcess, Vec<u8>, u16)>,
-}
-
-impl MessageStore {
-    pub fn new(name: &str) -> MessageStore {
-        // MessageStore {queue: QueueFile::open(name).unwrap()}
-        MessageStore {
-            queue: VecDeque::new(),
-        }
-    }
-
-    pub fn push(&mut self, publisher: WriterProcess, packet: Vec<u8>, message_id: u16) {
-        self.queue.push_back((publisher, packet, message_id))
-        // let mut encoded = Vec::with_capacity(8 + 2 + packet.len());
-        // let mut mask =
-        // self.queue.add(encoded).unwrap();
-    }
-
-    pub fn len(&self) -> usize {
-        self.queue.len()
-    }
-
-    pub fn peek(&self) -> Option<&(WriterProcess, Vec<u8>, u16)> {
-        self.queue.get(0)
-    }
-
-    pub fn poll(&mut self) -> Option<(WriterProcess, Vec<u8>, u16)> {
-        self.queue.pop_front()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.queue.is_empty()
-    }
-}
-
-pub struct Queue {
+pub struct QueueState {
     name: String,
     buf: MessageStore,
     // buf: HashMap<u16, (WriterProcess, Vec<u8>)>,
     pub subscribers: VecDeque<(u8, WriterProcess)>,
     retained_msg: Option<PublishPacket>,
+    process: QueueProcess,
 }
 
-impl Queue {
-    pub fn new(name: &str) -> Queue {
-        Queue {
+impl QueueState {
+    pub fn new(name: &str, process: QueueProcess) -> QueueState {
+        QueueState {
             name: name.to_string(),
             buf: MessageStore::new(""),
             // buf: HashMap::new(),
             retained_msg: None,
             subscribers: VecDeque::new(),
+            process,
         }
     }
 
     pub fn handle_qos0(&mut self, packet: &PublishPacket, protocol_version: u8) {
         let encoded = packet.encode(protocol_version).unwrap();
         for (_, sub) in self.subscribers.iter() {
-            if let Err(e) = sub.request(WriterMessage::Publish(encoded.clone())) {
+            if let Err(e) = sub.request(WriterMessage::Publish(
+                packet.qos,
+                // send 0 if qos 0 because it's not going to be used anyway
+                packet.message_id.unwrap_or(0),
+                encoded.clone(),
+                self.process.clone(),
+            )) {
                 eprintln!("Failed to send QoS 0 packet to {:?}. Details: {:?}", sub, e);
             }
         }
@@ -108,9 +79,12 @@ impl Queue {
                     // }
                     // make sure we write puback once and continue trying to publish
                     println!("WRITING TO SUB");
-                    if let Ok(WriterResponse::Sent) =
-                        sub.request(WriterMessage::Publish(packet.to_vec()))
-                    {
+                    if let Ok(WriterResponse::Sent) = sub.request(WriterMessage::Publish(
+                        1,
+                        *message_id,
+                        packet.to_vec(),
+                        self.process.clone(),
+                    )) {
                         println!("Sent QoS 1 packet to {:?}", sub);
                         // write back subscriber
                         self.subscribers.push_back((qos, sub));
@@ -128,11 +102,13 @@ impl Queue {
                 }
                 // if no puback was sent but subscribers are not empty,
                 // remove message
-                if !puback_sent && !self.buf.is_empty() {
-                    return;
-                }
-                if let None = self.buf.poll() {
-                    eprintln!("[Queue {}] Failed to poll from message store", self.name)
+                // if !puback_sent && !self.buf.is_empty() {
+                //     return;
+                // }
+                if let Some((_, msg, msg_id)) = self.buf.poll() {
+                    self.buf.wait_puback(msg_id, msg);
+                } else {
+                    eprintln!("[Queue {}] Failed to poll from message store", self.name);
                 }
             }
         }
@@ -151,24 +127,25 @@ impl Queue {
         protocol_version: u8,
     ) {
     }
+
+    pub fn release_puback(&mut self, msg_id: u16) {
+        self.buf.release_qos1(msg_id);
+    }
 }
 
 pub fn new_queue(name: String, mailbox: Mailbox<QueueRequest>) {
-    let mut q = Queue::new(&name);
+    let this = process::this(&mailbox);
+    let mut q = QueueState::new(&name, this);
     loop {
         // q.send_messages();
         match mailbox.receive() {
             Ok(data) => {
                 println!("[Queue {}] Received mqtt message {:?}", name, data);
                 match data {
-                    QueueRequest::Publish(mut packet, client_id, publisher, protocol_version) => {
+                    QueueRequest::Publish(packet, client_id, publisher, protocol_version) => {
                         // QoS 0 - fire and forget
                         println!("SUBSCRIBERS IN LIST: {}", q.subscribers.len());
-                        let orig_qos = packet.qos;
-                        // we want to send a QoS 0 publish to the subscribers
-                        // because we don't want to receive
-                        // packet.qos = 0;
-                        match orig_qos {
+                        match packet.qos {
                             0 => q.handle_qos0(&packet, protocol_version),
                             1 => q.handle_qos1(&packet, publisher, protocol_version),
                             2 => q.handle_qos2(&packet, publisher, protocol_version),
@@ -199,6 +176,9 @@ pub fn new_queue(name: String, mailbox: Mailbox<QueueRequest>) {
                     QueueRequest::Unsubscribe(unsub) => {
                         // q.subscribers
                         //     .retain(|(_, writer)| writer.id() != unsub.id());
+                    }
+                    QueueRequest::Puback(msg_id) => {
+                        q.release_puback(msg_id);
                     }
                 }
             }

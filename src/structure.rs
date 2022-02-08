@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 pub type WriterProcess = Process<Request<WriterMessage, WriterResponse>>;
 pub type ReaderProcess = Process<()>;
 pub type BrokerProcess = Process<Request<BrokerRequest, BrokerResponse>>;
+pub type QueueProcess = Process<QueueRequest>;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum QueueRequest {
@@ -17,6 +18,8 @@ pub enum QueueRequest {
     Subscribe(u8, u16, WriterProcess),
     /// Send only client_id
     Unsubscribe(WriterProcess),
+    /// Release message because subscriber acknowledged message
+    Puback(u16),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -57,7 +60,10 @@ pub enum WriterMessage {
     Connack(ConnackPacket),
     Suback(SubackPacket),
     Unsuback(u16),
-    Publish(Vec<u8>),
+    Publish(u8, u16, Vec<u8>, QueueProcess),
+    ReaderPuback(u16),
+    ReaderPubrec(u16),
+    ReaderPubcomp(u16),
     Puback(u16),
     Pubrec(u16),
     Pubcomp(u16),

@@ -1,9 +1,10 @@
-use crate::structure::{ConnectionMessage, WriterMessage, WriterResponse};
+use crate::structure::{QueueProcess, QueueRequest, WriterMessage, WriterResponse};
 use lunatic::{net, Mailbox, Request};
 use mqtt_packet_3_5::{
     ConfirmationPacket, ConnackPacket, ConnectPacket, FixedHeader, MqttPacket, Packet, PacketType,
-    PingrespPacket, PubackPubrecCode, PublishPacket, UnsubackCode, UnsubackPacket,
+    PublishPacket, UnsubackCode, UnsubackPacket,
 };
+use std::collections::HashMap;
 use std::io::Write;
 
 pub struct TcpWriter {
@@ -12,6 +13,8 @@ pub struct TcpWriter {
     qos_1_buf: Vec<PublishPacket>,
     qos_2_buf: Vec<PublishPacket>,
     connect_packet: ConnectPacket,
+    qos_1_waiting: HashMap<u16, QueueProcess>,
+    qos_2_waiting: HashMap<u16, QueueProcess>,
 }
 
 impl TcpWriter {
@@ -22,6 +25,8 @@ impl TcpWriter {
             is_receiving: true,
             qos_1_buf: vec![],
             qos_2_buf: vec![],
+            qos_1_waiting: HashMap::new(),
+            qos_2_waiting: HashMap::new(),
         }
     }
 
@@ -55,6 +60,20 @@ impl TcpWriter {
             Err(e) => eprintln!("Failed to encode message {:?}", e),
         }
     }
+
+    pub fn save_publish_qos1(&mut self, msg_id: u16, queue: QueueProcess) {
+        self.qos_1_waiting.insert(msg_id, queue);
+    }
+
+    pub fn save_publish_qos2(&mut self, msg_id: u16, queue: QueueProcess) {
+        self.qos_2_waiting.insert(msg_id, queue);
+    }
+
+    pub fn release_puback(&mut self, msg_id: u16) {
+        if let Some(queue) = self.qos_1_waiting.get(&msg_id) {
+            queue.send(QueueRequest::Puback(msg_id));
+        }
+    }
 }
 
 // This process has a one mailbox that it's listening to
@@ -86,7 +105,12 @@ pub fn write_mqtt(
                             properties: None,
                         }));
                     }
-                    WriterMessage::Publish(data) => {
+                    WriterMessage::Publish(qos, msg_id, data, queue) => {
+                        match *qos {
+                            1 => state.save_publish_qos1(*msg_id, queue.clone()),
+                            2 => state.save_publish_qos2(*msg_id, queue.clone()),
+                            _ => {}
+                        }
                         match state.stream.write_all(data) {
                             Ok(_) => {
                                 println!(
@@ -131,6 +155,11 @@ pub fn write_mqtt(
                         );
                         return;
                     }
+                    WriterMessage::ReaderPuback(id) => {
+                        state.release_puback(*id);
+                    }
+                    WriterMessage::ReaderPubrec(id) => {}
+                    WriterMessage::ReaderPubcomp(id) => {}
                 }
                 println!(
                     "[Writer {}] WRITER SENDING REPLY {:?}",

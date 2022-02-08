@@ -7,8 +7,8 @@ use std::collections::HashMap;
 
 use crate::structure::*;
 use mqtt_packet_3_5::{
-    ConnectPacket, FixedHeader, MqttCode, MqttPacket, PacketDecoder, PacketType, PingrespPacket,
-    PublishPacket, SubackPacket, SubscribePacket, SubscriptionReasonCode,
+    ConfirmationPacket, ConnectPacket, MqttCode, MqttPacket, PacketDecoder, PacketType,
+    PingrespPacket, PublishPacket, SubackPacket, SubscribePacket, SubscriptionReasonCode,
 };
 
 struct ConnectionHelper {
@@ -17,7 +17,6 @@ struct ConnectionHelper {
     writer_process: WriterProcess,
     connect_packet: ConnectPacket,
     pub reader: PacketDecoder<net::TcpStream>,
-    pub is_receiving: bool,
 }
 
 impl ConnectionHelper {
@@ -33,7 +32,6 @@ impl ConnectionHelper {
             reader: PacketDecoder::from_stream(stream),
             connect_packet,
             writer_process,
-            is_receiving: true,
         }
     }
 
@@ -70,16 +68,6 @@ impl ConnectionHelper {
                 }
             })
     }
-
-    // pub fn use_new_stream(&mut self, stream: net::TcpStream, packet: ConnectPacket) {
-    //     self.reader = PacketDecoder::from_stream(stream.clone());
-    //     self.is_receiving = true;
-    //     self.connect_packet = packet;
-    //     self.writer_process.request(WriterMessage::Connection(
-    //         ConnectionMessage::Connect(0x0),
-    //         Some(stream),
-    //     ));
-    // }
 
     pub fn read(&mut self) -> Result<MqttPacket, String> {
         self.reader
@@ -146,6 +134,15 @@ impl ConnectionHelper {
             ),
         }
     }
+
+    pub fn puback(&mut self, packet: ConfirmationPacket) {
+        if let Err(e) = self
+            .writer_process
+            .request(WriterMessage::ReaderPuback(packet.message_id))
+        {
+            eprintln!("Failed to send puback to writer {:?}", e);
+        }
+    }
 }
 
 pub fn handle_tcp(
@@ -173,6 +170,7 @@ pub fn handle_tcp(
                     //     state.handle_connect(connect_packet, this.clone())
                     // }
                     MqttPacket::Disconnect(_) => state.disconnect(),
+                    MqttPacket::Puback(packet) => state.puback(packet),
                     MqttPacket::Pingreq => state.pong(),
                     // handle queue messages
                     MqttPacket::Publish(packet) => state.publish(packet),
@@ -195,7 +193,7 @@ pub fn handle_tcp(
                         "[Reader {}] Exiting process...",
                         state.connect_packet.client_id
                     );
-                    // state.close_writer();
+                    state.disconnect();
                     return;
                 }
             }
