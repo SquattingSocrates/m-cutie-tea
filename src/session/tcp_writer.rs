@@ -68,16 +68,10 @@ impl TcpWriter {
     pub fn save_publish_qos2(&mut self, msg_id: u16, queue: QueueProcess) {
         self.qos_2_waiting.insert(msg_id, queue);
     }
-
-    pub fn release_puback(&mut self, msg_id: u16) {
-        if let Some(queue) = self.qos_1_waiting.get(&msg_id) {
-            queue.send(QueueRequest::Puback(msg_id));
-        }
-    }
 }
 
-// This process has a one mailbox that it's listening to
-// but there can be multiple types of messages
+/// This process has a one mailbox that it's listening to
+/// but there can be multiple types of messages
 pub fn write_mqtt(
     (stream, connect_packet): (net::TcpStream, ConnectPacket),
     mailbox: Mailbox<Request<WriterMessage, WriterResponse>>,
@@ -105,12 +99,7 @@ pub fn write_mqtt(
                             properties: None,
                         }));
                     }
-                    WriterMessage::Publish(qos, msg_id, data, queue) => {
-                        match *qos {
-                            1 => state.save_publish_qos1(*msg_id, queue.clone()),
-                            2 => state.save_publish_qos2(*msg_id, queue.clone()),
-                            _ => {}
-                        }
+                    WriterMessage::Publish(data) => {
                         match state.stream.write_all(data) {
                             Ok(_) => {
                                 println!(
@@ -128,22 +117,12 @@ pub fn write_mqtt(
                             }
                         };
                     }
-                    WriterMessage::Puback(message_id) => {
-                        state.write_packet(MqttPacket::Puback(ConfirmationPacket::puback_v3(
-                            *message_id,
-                            //puback_reason_code: Some(PubackPubrecCode::ImplementationSpecificError),
-                            //pubcomp_reason_code: None,
-                        )));
-                    }
-                    WriterMessage::Pubrec(message_id) => {
-                        state.write_packet(MqttPacket::Pubrec(ConfirmationPacket::pubrec_v3(
-                            *message_id,
-                        )));
-                    }
-                    WriterMessage::Pubcomp(message_id) => {
-                        state.write_packet(MqttPacket::Pubcomp(ConfirmationPacket::pubcomp_v3(
-                            *message_id,
-                        )));
+                    WriterMessage::Confirmation(packet) => {
+                        state.write_buf(
+                            packet
+                                .encode(state.connect_packet.protocol_version)
+                                .unwrap(),
+                        );
                     }
                     WriterMessage::Pong => {
                         state.write_packet(MqttPacket::Pingresp);
@@ -155,11 +134,6 @@ pub fn write_mqtt(
                         );
                         return;
                     }
-                    WriterMessage::ReaderPuback(id) => {
-                        state.release_puback(*id);
-                    }
-                    WriterMessage::ReaderPubrec(id) => {}
-                    WriterMessage::ReaderPubcomp(id) => {}
                 }
                 println!(
                     "[Writer {}] WRITER SENDING REPLY {:?}",
@@ -168,7 +142,10 @@ pub fn write_mqtt(
                 msg.reply(response)
             }
             Err(e) => {
-                eprintln!("Failed to receive mailbox {:?}", e);
+                eprintln!(
+                    "[Writer {}] Failed to receive mailbox {:?}",
+                    state.connect_packet.client_id, e
+                );
             }
         }
     }

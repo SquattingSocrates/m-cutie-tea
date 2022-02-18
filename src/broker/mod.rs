@@ -48,12 +48,18 @@ impl Broker {
         self.subs.ensure_topic_queue(topic)
     }
 
-    pub fn subscribe_process(&mut self, packet: SubscribePacket, writer: WriterProcess) {
+    pub fn subscribe_process(
+        &mut self,
+        packet: SubscribePacket,
+        session: SessionProcess,
+        writer: WriterProcess,
+    ) {
         for sub in packet.subscriptions.iter() {
             for q in self.subs.get_matching_queues(&sub.topic) {
                 q.process.send(QueueRequest::Subscribe(
                     packet.qos,
                     packet.message_id,
+                    session.clone(),
                     writer.clone(),
                 ))
             }
@@ -77,8 +83,12 @@ pub fn broker_process(mailbox: Mailbox<Request<BrokerRequest, BrokerResponse>>) 
                 let message = message.unwrap();
                 let mut response = BrokerResponse::Subscribed;
                 match message.data() {
-                    BrokerRequest::Subscribe(packet, writer_process) => {
-                        state.subscribe_process(packet.clone(), writer_process.clone());
+                    BrokerRequest::Subscribe(packet, session_process, writer_process) => {
+                        state.subscribe_process(
+                            packet.clone(),
+                            session_process.clone(),
+                            writer_process.clone(),
+                        );
                         response = BrokerResponse::Subscribed;
                     }
                     BrokerRequest::GetQueue(topic) => {

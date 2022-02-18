@@ -2,7 +2,8 @@ use lunatic::{net, process, Config, Environment};
 
 // use mqtt_broker::queue::{broker, tcp_reader};
 use mqtt_broker::broker;
-use mqtt_broker::queue;
+// use mqtt_broker::queue;
+use mqtt_broker::session;
 
 fn main() {
     let mut client_conf = Config::new(5_000_000, None);
@@ -24,7 +25,7 @@ fn main() {
     let listener = net::TcpListener::bind(address).unwrap();
     while let Ok((stream, _)) = listener.accept() {
         client_module
-            .spawn_with(stream, queue::connect_client)
+            .spawn_with(stream, session::connect_client)
             .unwrap();
     }
 }
