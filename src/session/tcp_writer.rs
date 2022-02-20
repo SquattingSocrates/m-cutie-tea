@@ -30,21 +30,6 @@ impl TcpWriter {
         }
     }
 
-    pub fn use_new_stream(&mut self, stream: Option<net::TcpStream>) {
-        self.stream = stream.unwrap();
-        let protocol_version = self.connect_packet.protocol_version;
-        let connack = ConnackPacket {
-            properties: None,
-            reason_code: if protocol_version == 5 { Some(0) } else { None },
-            return_code: if protocol_version != 5 { Some(0) } else { None },
-            session_present: false,
-        };
-        match connack.encode(protocol_version) {
-            Ok(buf) => self.write_buf(buf),
-            Err(e) => eprintln!("Failed to encode connack message {:?}", e),
-        }
-    }
-
     fn write_buf(&mut self, buf: Vec<u8>) {
         match self.stream.write_all(&buf) {
             Ok(_) => println!("Wrote connection response to client"),
@@ -59,14 +44,6 @@ impl TcpWriter {
             Ok(buf) => self.write_buf(buf),
             Err(e) => eprintln!("Failed to encode message {:?}", e),
         }
-    }
-
-    pub fn save_publish_qos1(&mut self, msg_id: u16, queue: QueueProcess) {
-        self.qos_1_waiting.insert(msg_id, queue);
-    }
-
-    pub fn save_publish_qos2(&mut self, msg_id: u16, queue: QueueProcess) {
-        self.qos_2_waiting.insert(msg_id, queue);
     }
 }
 
@@ -129,7 +106,7 @@ pub fn write_mqtt(
                     }
                     WriterMessage::Die => {
                         println!(
-                            "[Writer {}] Killing TCP_Reader Process",
+                            "[Writer {}] Killing TCP_Writer Process",
                             state.connect_packet.client_id
                         );
                         return;

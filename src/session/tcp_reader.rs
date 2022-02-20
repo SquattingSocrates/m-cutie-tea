@@ -72,10 +72,13 @@ impl ConnectionHelper {
 
     pub fn confirmation(&mut self, packet: ConfirmationPacket) {
         let cmd = packet.cmd;
-        println!("SENDING CONFIRMATION TO SESSION {:?}", packet);
+        println!(
+            "[Reader {}] SENDING CONFIRMATION TO SESSION {:?}",
+            self.connect_packet.client_id, packet
+        );
         if let Err(e) = self
             .session_process
-            .request(SessionRequest::Confirmation(packet, MessageSource::Client))
+            .request(SessionRequest::ConfirmationClient(packet))
         {
             eprintln!("Failed to send {:?} to session {:?}", cmd, e);
         }

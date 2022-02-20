@@ -2,6 +2,7 @@ use crate::structure::*;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, SystemTime};
 
+#[derive(Debug)]
 pub struct QueuedMessage {
     pub publisher: SessionProcess,
     pub message: Vec<u8>,
@@ -14,8 +15,11 @@ pub struct MessageStore {
     /// messages that are ready to be sent
     ready_messages: VecDeque<QueuedMessage>,
     /// stores sent messages as well as timestamp to find out whether it
-    /// can be deleted due to timeout
-    sent_messages: HashMap<u16, (QueuedMessage, SystemTime)>,
+    /// can be deleted due to timeout. Also keeps track of the subscriber
+    /// process, which is the first one that successfully wrote to a client
+    /// if it's QoS 1 and the ONLY process if it's QoS 2
+    /// It stores the SessionProcess of the subscriber
+    sent_messages: HashMap<u16, (QueuedMessage, SystemTime, SessionProcess)>,
 }
 
 ///
@@ -66,13 +70,21 @@ impl MessageStore {
         self.ready_messages.is_empty()
     }
 
-    pub fn mark_sent_msg(&mut self, msg_id: u16) {
+    pub fn mark_sent_msg(&mut self, msg_id: u16, sub: Option<SessionProcess>) {
         println!("Releasing high qos message {}", self.ready_messages.len());
+        if let None = sub {
+            eprintln!(
+                "[Message Store] something went wrong, sub is None {}",
+                msg_id
+            );
+            return;
+        }
         if let Some(msg) = self.ready_messages.pop_front() {
             // msg.state = state;
             self.sent_messages
-                .insert(msg.message_id, (msg, SystemTime::now()));
+                .insert(msg.message_id, (msg, SystemTime::now(), sub.unwrap()));
         }
+        self.set_msg_state(msg_id, MessageEvent::Send);
         println!(
             "DONE Releasing high qos message {}",
             self.ready_messages.len()
@@ -85,5 +97,21 @@ impl MessageStore {
         } else {
             println!("Failed to delete message with id {:?}", msg_id);
         }
+    }
+
+    /// should mark message as READY TO SEND PUBREL
+    /// and return the subscriber process if there already is one
+    pub fn set_msg_state(&mut self, msg_id: u16, event: MessageEvent) -> Option<&SessionProcess> {
+        if let Some((msg, _, sub)) = self.sent_messages.get_mut(&msg_id) {
+            msg.state = msg.state.transition(event);
+            if msg.state == MessageState::Released {
+                return Some(sub);
+            }
+        }
+        None
+    }
+
+    pub fn mark_received_msg(&mut self, msg_id: u16) {
+        if let Some((msg, _, sub)) = self.sent_messages.get_mut(&msg_id) {}
     }
 }

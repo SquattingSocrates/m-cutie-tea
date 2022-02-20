@@ -74,8 +74,8 @@ impl SessionState {
 
     pub fn handle_client_confirmation(&mut self, confirmation: &ConfirmationPacket) {
         println!(
-            "[Session {}] GOT CLIENT CONFIRMATION {:?}",
-            self.client_id, confirmation
+            "[Session {}] GOT CLIENT CONFIRMATION {:?} | {:?}",
+            self.client_id, confirmation, self.qos2
         );
         if let Some(proc) = self.qos2.get(&confirmation.message_id) {
             println!(
@@ -85,15 +85,25 @@ impl SessionState {
             proc.send(QueueRequest::Confirmation(
                 confirmation.cmd,
                 confirmation.message_id,
+                self.this.clone(),
             ))
         }
     }
 
-    pub fn handle_server_confirmation(&mut self, confirmation: &ConfirmationPacket) {
+    pub fn handle_server_confirmation(
+        &mut self,
+        confirmation: &ConfirmationPacket,
+        queue: &QueueProcess,
+    ) {
         println!(
             "[Session {}] GOT SERVER CONFIRMATION {:?}",
             self.client_id, confirmation
         );
+        if confirmation.cmd == PacketType::Puback {
+            self.save_queue(1, confirmation.message_id, queue.clone());
+        } else {
+            self.save_queue(2, confirmation.message_id, queue.clone());
+        }
         if let Err(e) = self
             .writer_process
             .request(WriterMessage::Confirmation(confirmation.clone()))
@@ -111,11 +121,7 @@ impl SessionState {
     }
 
     pub fn publish_to_client(&mut self, qos: u8, msg_id: u16, buf: &Vec<u8>, queue: QueueProcess) {
-        if qos == 1 {
-            self.qos1.insert(msg_id, queue);
-        } else {
-            self.qos2.insert(msg_id, queue);
-        }
+        self.save_queue(qos, msg_id, queue);
         if let Ok(WriterResponse::Sent) = self
             .writer_process
             .request(WriterMessage::Publish(buf.clone()))
@@ -124,6 +130,14 @@ impl SessionState {
                 "[Session {}] Sent publish to client {}",
                 self.client_id, msg_id
             );
+        }
+    }
+
+    fn save_queue(&mut self, qos: u8, msg_id: u16, queue: QueueProcess) {
+        if qos == 1 {
+            self.qos1.insert(msg_id, queue);
+        } else {
+            self.qos2.insert(msg_id, queue);
         }
     }
 
@@ -189,19 +203,21 @@ pub fn session_process(
                     SessionRequest::Subscribe(packet) => {
                         state.subscribe(packet);
                     }
-                    SessionRequest::Confirmation(packet, MessageSource::Client) => {
+                    SessionRequest::ConfirmationClient(packet) => {
                         state.handle_client_confirmation(packet)
                     }
-                    SessionRequest::Confirmation(packet, MessageSource::Server) => {
-                        state.handle_server_confirmation(packet)
+                    SessionRequest::ConfirmationServer(packet, queue) => {
+                        state.handle_server_confirmation(packet, queue)
                     }
                     SessionRequest::PublishBroker(qos, msg_id, buf, queue) => {
                         state.publish_to_client(*qos, *msg_id, buf, queue.clone())
                     }
                 }
                 println!(
-                    "[Session {}] Session SENDING REPLY {:?}",
-                    state.client_id, response
+                    "[Session {}] Session SENDING REPLY {:?} | {:?}",
+                    state.client_id,
+                    response,
+                    msg.data()
                 );
                 msg.reply(response)
             }

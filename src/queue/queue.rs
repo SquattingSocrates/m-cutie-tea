@@ -68,6 +68,7 @@ impl QueueState {
             if self.subscribers.is_empty() {
                 return;
             }
+            // println!("[Queue {}] Trying to send message to sub", self.name);
             if let Some(QueuedMessage {
                 publisher,
                 message,
@@ -78,11 +79,9 @@ impl QueueState {
             {
                 let mut wrote_message = false;
                 let qos = *qos;
+                let mut chosen_sub = None;
                 for _ in 0..self.subscribers.len() {
                     let (sub_qos, sub, _w) = self.subscribers.pop_front().unwrap();
-                    // if *qos == 0 {
-                    //     continue;
-                    // }
                     // make sure we write puback once and continue trying to publish
                     println!(
                         "[Queue {}] WRITING TO SUB {:?} {:?}",
@@ -101,18 +100,25 @@ impl QueueState {
                             self.name, message_id, qos, sub
                         );
                         if !wrote_message {
+                            println!(
+                                "[Queue {}] Going to send server confirmation {} {}",
+                                self.name, qos, message_id
+                            );
                             let res = if qos == 1 {
-                                publisher.request(SessionRequest::Confirmation(
-                                    ConfirmationPacket::puback_v3(*message_id),
-                                    MessageSource::Server,
+                                let conf = ConfirmationPacket::puback_v3(*message_id);
+                                publisher.request(SessionRequest::ConfirmationServer(
+                                    conf,
+                                    self.process.clone(),
                                 ))
                             } else {
-                                publisher.request(SessionRequest::Confirmation(
-                                    ConfirmationPacket::pubrec_v3(*message_id),
-                                    MessageSource::Server,
+                                let conf = ConfirmationPacket::pubrec_v3(*message_id);
+                                publisher.request(SessionRequest::ConfirmationServer(
+                                    conf,
+                                    self.process.clone(),
                                 ))
                             };
                             if let Ok(_) = res {
+                                chosen_sub = Some(sub.clone());
                                 wrote_message = true;
                             }
                         }
@@ -123,7 +129,7 @@ impl QueueState {
                     }
                 }
                 if wrote_message {
-                    self.buf.mark_sent_msg(*message_id);
+                    self.buf.mark_sent_msg(*message_id, chosen_sub);
                 }
                 // eprintln!("[Queue {}] Failed to poll from message store", self.name);
             }
@@ -136,16 +142,45 @@ impl QueueState {
         // self.subscribers.filter(|(qos, sub)| !to_remove.contains(&sub));
     }
 
-    pub fn register_confirmation(&mut self, packet_type: PacketType, msg_id: u16) {
+    pub fn register_confirmation(
+        &mut self,
+        packet_type: PacketType,
+        msg_id: u16,
+        publisher: SessionProcess,
+    ) {
+        println!(
+            "[Queue {}] registering confirmation {:?} {:?}",
+            self.name, packet_type, msg_id
+        );
         match packet_type {
             PacketType::Puback => self.buf.delete_msg(msg_id),
             PacketType::Pubrec => {
-                println!("Received pubrec for msg {}", msg_id);
-                self.buf.delete_msg(msg_id);
+                println!("[Queue {}] Received pubrec for msg {}", self.name, msg_id);
+                // check whether a pubrel has been received from the publisher
+                if let Some(sub) = self.buf.set_msg_state(msg_id, MessageEvent::Pubrec) {
+                    sub.request(SessionRequest::ConfirmationServer(
+                        ConfirmationPacket::pubrel_v3(msg_id),
+                        self.process.clone(),
+                    ));
+                }
             }
-            // PacketType::Pubrel => self.buf.set_pubrel(msg_id),
-            PacketType::Pubcomp => println!("Received pubrec for msg {}", msg_id),
-            t => println!("Received other PacketType {:?} | {}", t, msg_id),
+            // pubrel comes from publisher and we need to send a pubrel
+            // to the subscriber IF the subscriber sent us back a PUBREC
+            PacketType::Pubrel => {
+                println!("[Queue {}] Received pubrel for msg {}", self.name, msg_id);
+                if let Some(sub) = self.buf.set_msg_state(msg_id, MessageEvent::Pubrel) {
+                    sub.request(SessionRequest::ConfirmationServer(
+                        ConfirmationPacket::pubrel_v3(msg_id),
+                        self.process.clone(),
+                    ));
+                    publisher.request(SessionRequest::ConfirmationServer(
+                        ConfirmationPacket::pubcomp_v3(msg_id),
+                        self.process.clone(),
+                    ));
+                }
+            }
+            PacketType::Pubcomp => println!("[Queue] Received pubcomp for msg {}", msg_id),
+            t => println!("[Queue] Received other PacketType {:?} | {}", t, msg_id),
         }
     }
 }
@@ -194,8 +229,8 @@ pub fn new_queue(name: String, mailbox: Mailbox<QueueRequest>) {
                         q.subscribers
                             .retain(|(_, session, writer)| writer.id() != unsub.id());
                     }
-                    QueueRequest::Confirmation(packet_type, msg_id) => {
-                        q.register_confirmation(packet_type, msg_id)
+                    QueueRequest::Confirmation(packet_type, msg_id, publisher) => {
+                        q.register_confirmation(packet_type, msg_id, publisher)
                     }
                 }
             }

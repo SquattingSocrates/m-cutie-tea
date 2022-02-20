@@ -21,7 +21,7 @@ pub enum QueueRequest {
     /// Send only client_id
     Unsubscribe(WriterProcess),
     /// request type for PUBACK, PUBREL, PUBREC and PUBCOMP
-    Confirmation(PacketType, u16),
+    Confirmation(PacketType, u16, SessionProcess),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -53,7 +53,8 @@ pub enum MessageSource {
 pub enum SessionRequest {
     Publish(PublishPacket),
     Subscribe(SubscribePacket),
-    Confirmation(ConfirmationPacket, MessageSource),
+    ConfirmationClient(ConfirmationPacket),
+    ConfirmationServer(ConfirmationPacket, QueueProcess),
     PublishBroker(u8, u16, Vec<u8>, QueueProcess),
 }
 
@@ -106,13 +107,44 @@ pub enum PostOfficeRequest {
 }
 
 #[derive(Debug, PartialEq)]
+pub enum MessageEvent {
+    Send,
+    /// Receive Pubrel from publisher
+    Pubrel,
+    /// Receive Pubrec from subscriber
+    Pubrec,
+}
+
+#[derive(Debug, PartialEq)]
 pub enum MessageState {
     /// Ready is the initial state of all messages
     Ready,
     /// Sent is actually only relevant for QoS 2. It means the message
     /// has been published and a PUBREC has been sent to the publisher
+    /// It can transition to Released IFF we receive a PUBREC from the subscriber
     Sent,
-    /// ToDelete marks messages as deletable, whether it's set through an PUBACK
+    /// Waiting means that a PUBREL from the Publisher arrived before the PUBREC
+    /// of the Subscriber
+    Waiting,
+    /// Essentially means that a PUBREC from the subscriber has been received
+    Released,
+    /// Received marks messages as deletable, whether it's set through an PUBACK
     /// or a PUBREC from the subscriber
-    ToDelete,
+    Received,
+}
+
+impl MessageState {
+    pub fn transition(&self, event: MessageEvent) -> MessageState {
+        match (self, &event) {
+            (MessageState::Ready, MessageEvent::Send) => MessageState::Sent,
+            (MessageState::Sent, MessageEvent::Pubrec) => MessageState::Received,
+            (MessageState::Sent, MessageEvent::Pubrel) => MessageState::Waiting,
+            (MessageState::Waiting, MessageEvent::Pubrec) => MessageState::Released,
+            (MessageState::Received, MessageEvent::Pubrel) => MessageState::Released,
+            _ => panic!(
+                "Invalid combination of message state and event {:?} | {:?}",
+                self, event
+            ),
+        }
+    }
 }
