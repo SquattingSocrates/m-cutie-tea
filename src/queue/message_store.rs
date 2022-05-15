@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime};
 
 #[derive(Debug)]
 pub struct QueuedMessage {
-    pub publisher: SessionProcess,
+    pub publisher: WriterProcess,
     pub message: Vec<u8>,
     pub message_id: u16,
     pub state: MessageState,
@@ -18,8 +18,8 @@ pub struct MessageStore {
     /// can be deleted due to timeout. Also keeps track of the subscriber
     /// process, which is the first one that successfully wrote to a client
     /// if it's QoS 1 and the ONLY process if it's QoS 2
-    /// It stores the SessionProcess of the subscriber
-    sent_messages: HashMap<u16, (QueuedMessage, SystemTime, SessionProcess)>,
+    /// It stores the WriterProcess of the subscriber
+    sent_messages: HashMap<u16, (QueuedMessage, SystemTime, WriterProcess)>,
 }
 
 ///
@@ -42,7 +42,7 @@ impl MessageStore {
         }
     }
 
-    pub fn push(&mut self, publisher: SessionProcess, message: Vec<u8>, message_id: u16, qos: u8) {
+    pub fn push(&mut self, publisher: WriterProcess, message: Vec<u8>, message_id: u16, qos: u8) {
         self.ready_messages.push_back(QueuedMessage {
             publisher,
             message,
@@ -70,7 +70,7 @@ impl MessageStore {
         self.ready_messages.is_empty()
     }
 
-    pub fn mark_sent_msg(&mut self, msg_id: u16, sub: Option<SessionProcess>) {
+    pub fn mark_sent_msg(&mut self, msg_id: u16, sub: Option<WriterProcess>) {
         println!("Releasing high qos message {}", self.ready_messages.len());
         if let None = sub {
             eprintln!(
@@ -101,7 +101,7 @@ impl MessageStore {
 
     /// should mark message as READY TO SEND PUBREL
     /// and return the subscriber process if there already is one
-    pub fn set_msg_state(&mut self, msg_id: u16, event: MessageEvent) -> Option<&SessionProcess> {
+    pub fn set_msg_state(&mut self, msg_id: u16, event: MessageEvent) -> Option<&WriterProcess> {
         if let Some((msg, _, sub)) = self.sent_messages.get_mut(&msg_id) {
             msg.state = msg.state.transition(event);
             if msg.state == MessageState::Released {

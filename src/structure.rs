@@ -1,34 +1,44 @@
-use lunatic::{net, process::Process, Request};
+use super::broker::Broker;
+use super::queue::queue::QueueState;
+use super::session::tcp_writer::TcpWriter;
+use lunatic::{
+    net,
+    process::{ProcessRef, Request},
+};
 use mqtt_packet_3_5::{
     ConfirmationPacket, ConnackPacket, ConnectPacket, PacketType, PublishPacket, SubackPacket,
     SubscribePacket,
 };
 use serde::{Deserialize, Serialize};
 
-pub type WriterProcess = Process<Request<WriterMessage, WriterResponse>>;
+pub type WriterProcess = ProcessRef<TcpWriter>;
 pub type ReaderProcess = Process<()>;
-pub type BrokerProcess = Process<Request<BrokerRequest, BrokerResponse>>;
-pub type QueueProcess = Process<QueueRequest>;
-pub type SessionProcess = Process<Request<SessionRequest, SessionResponse>>;
+pub type BrokerProcess = ProcessRef<Broker>;
+pub type QueueProcess = ProcessRef<QueueState>;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum QueueRequest {
     /// WriterProcess is necessary for sending responses like Puback, Pubrel etc
-    Publish(PublishPacket, String, SessionProcess, u8),
+    Publish(PublishPacket, String, WriterProcess, u8),
     /// Send Matching subscription index as well as the subscribe packet and
     /// writer process
-    Subscribe(u8, u16, SessionProcess, WriterProcess),
+    Subscribe(u8, u16, WriterProcess),
     /// Send only client_id
     Unsubscribe(WriterProcess),
     /// request type for PUBACK, PUBREL, PUBREC and PUBCOMP
-    Confirmation(PacketType, u16, SessionProcess),
+    Confirmation(PacketType, u16, WriterProcess),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum QueueResponse {
+    Success,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum BrokerRequest {
     /// Request Queue Process for publishing by topic name
     GetQueue(String),
-    Subscribe(SubscribePacket, SessionProcess, WriterProcess),
+    Subscribe(SubscribePacket, WriterProcess),
     MoveToExistingSession(SessionConfig),
     /// Receives client_id and registers new Process
     RegisterSession(String, ReaderProcess),
@@ -41,32 +51,13 @@ pub enum BrokerResponse {
     Subscribed,
     Registered,
     ExistingSession(Option<ReaderProcess>),
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub enum MessageSource {
-    Client,
-    Server,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub enum SessionRequest {
-    Publish(PublishPacket),
-    Subscribe(SubscribePacket),
-    ConfirmationClient(ConfirmationPacket),
-    ConfirmationServer(ConfirmationPacket, QueueProcess),
-    PublishBroker(u8, u16, Vec<u8>, QueueProcess),
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub enum SessionResponse {
-    Success,
+    Destroyed,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Queue {
     pub name: String,
-    pub process: Process<QueueRequest>,
+    pub process: QueueProcess,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -82,10 +73,11 @@ pub enum WriterMessage {
     Connack(ConnackPacket),
     Suback(SubackPacket),
     Unsuback(u16),
-    Publish(Vec<u8>),
-    Confirmation(ConfirmationPacket),
+    Publish(u8, u16, Vec<u8>, QueueProcess),
+    Confirmation(ConfirmationPacket, QueueProcess),
     Pong,
     Die,
+    GetQueue(u16),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -93,6 +85,7 @@ pub enum WriterResponse {
     Success,
     Sent,
     Failed,
+    MatchingQueue(QueueProcess),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

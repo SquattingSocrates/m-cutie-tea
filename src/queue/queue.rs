@@ -1,5 +1,9 @@
 use super::message_store::{MessageStore, QueuedMessage};
-use lunatic::{process, Mailbox};
+use lunatic::{
+    process,
+    process::{AbstractProcess, ProcessRef, ProcessRequest, SelfReference},
+    Mailbox,
+};
 use std::collections::VecDeque;
 
 use crate::structure::*;
@@ -8,14 +12,14 @@ use mqtt_packet_3_5::{ConfirmationPacket, Packet, PacketType, PublishPacket, Sub
 pub struct QueueState {
     name: String,
     buf: MessageStore,
-    // buf: HashMap<u16, (SessionProcess, Vec<u8>)>,
-    pub subscribers: VecDeque<(u8, SessionProcess, WriterProcess)>,
+    // buf: HashMap<u16, (WriterProcess, Vec<u8>)>,
+    pub subscribers: VecDeque<(u8, WriterProcess)>,
     retained_msg: Option<PublishPacket>,
-    process: QueueProcess,
+    process: ProcessRef<QueueState>,
 }
 
 impl QueueState {
-    pub fn new(name: &str, process: QueueProcess) -> QueueState {
+    pub fn new(name: &str, process: ProcessRef<QueueState>) -> QueueState {
         QueueState {
             name: name.to_string(),
             buf: MessageStore::new(""),
@@ -29,8 +33,14 @@ impl QueueState {
     /// sends messages directly to writer process
     pub fn handle_qos0(&mut self, packet: &PublishPacket, protocol_version: u8) {
         let encoded = packet.encode(protocol_version).unwrap();
-        for (_, _, writer) in self.subscribers.iter() {
-            if let Err(e) = writer.request(WriterMessage::Publish(encoded.clone())) {
+        // TODO: create separate publish type for QoS 0
+        for (_, writer) in self.subscribers.iter() {
+            if let Err(e) = writer.request(WriterMessage::Publish(
+                packet.qos,
+                0,
+                encoded.clone(),
+                self.process.clone(),
+            )) {
                 eprintln!(
                     "Failed to send QoS 0 packet to {:?}. Details: {:?}",
                     writer, e
@@ -42,7 +52,7 @@ impl QueueState {
     pub fn enqueue_message(
         &mut self,
         packet: &PublishPacket,
-        publisher: SessionProcess,
+        publisher: WriterProcess,
         protocol_version: u8,
     ) {
         let encoded = packet.encode(protocol_version).unwrap();
@@ -81,51 +91,58 @@ impl QueueState {
                 let qos = *qos;
                 let mut chosen_sub = None;
                 for _ in 0..self.subscribers.len() {
-                    let (sub_qos, sub, _w) = self.subscribers.pop_front().unwrap();
+                    let (sub_qos, sub) = self.subscribers.pop_front().unwrap();
                     // make sure we write puback once and continue trying to publish
                     println!(
                         "[Queue {}] WRITING TO SUB {:?} {:?}",
                         self.name, message_id, publisher
                     );
-                    if let Ok(SessionResponse::Success) =
-                        sub.request(SessionRequest::PublishBroker(
-                            qos,
-                            *message_id,
-                            message.to_vec(),
-                            self.process.clone(),
-                        ))
-                    {
-                        println!(
-                            "[Queue {}] Sent message {} with QoS {} packet to {:?}",
-                            self.name, message_id, qos, sub
-                        );
-                        if !wrote_message {
-                            println!(
-                                "[Queue {}] Going to send server confirmation {} {}",
-                                self.name, qos, message_id
-                            );
-                            let res = if qos == 1 {
-                                let conf = ConfirmationPacket::puback_v3(*message_id);
-                                publisher.request(SessionRequest::ConfirmationServer(
-                                    conf,
-                                    self.process.clone(),
-                                ))
-                            } else {
-                                let conf = ConfirmationPacket::pubrec_v3(*message_id);
-                                publisher.request(SessionRequest::ConfirmationServer(
-                                    conf,
-                                    self.process.clone(),
-                                ))
-                            };
-                            if let Ok(_) = res {
-                                chosen_sub = Some(sub.clone());
-                                wrote_message = true;
+                    match sub.request(WriterMessage::Publish(
+                        qos,
+                        *message_id,
+                        message.to_vec(),
+                        self.process.clone(),
+                    )) {
+                        Ok(WriterResponse::Sent) => {
+                            // println!(
+                            //     "[Queue {}] Sent message {} with QoS {} packet to {:?}",
+                            //     self.name, message_id, qos, sub
+                            // );
+                            if !wrote_message {
+                                println!(
+                                    "[Queue {}] Going to send server confirmation {} {}",
+                                    self.name, qos, message_id
+                                );
+                                let res = if qos == 1 {
+                                    let conf = ConfirmationPacket::puback_v3(*message_id);
+                                    publisher.request(WriterMessage::Confirmation(
+                                        conf,
+                                        self.process.clone(),
+                                    ))
+                                } else {
+                                    let conf = ConfirmationPacket::pubrec_v3(*message_id);
+                                    publisher.request(WriterMessage::Confirmation(
+                                        conf,
+                                        self.process.clone(),
+                                    ))
+                                };
+                                // should write acknowledge only once
+                                if let (Ok(_), false) = (res, wrote_message) {
+                                    chosen_sub = Some(sub.clone());
+                                    wrote_message = true;
+                                }
                             }
+                            // push subscriber back into queue, otherwise it
+                            // gets removed. Should probably delete a subscriber only
+                            // if they are disconnected and have clean_session = true
+                            self.subscribers.push_back((qos, sub));
                         }
-                        // push subscriber back into queue, otherwise it
-                        // gets removed. Should probably delete a subscriber only
-                        // if they are disconnected and have clean_session = true
-                        self.subscribers.push_back((qos, sub, _w));
+                        Ok(other) => {
+                            println!("[Queue {}] OTHER SUB RESPONSE {:?}", self.name, other)
+                        }
+                        Err(e) => {
+                            eprintln!("[Queue {}] FAILED TO SEND TO SUB {:?}", self.name, e);
+                        }
                     }
                 }
                 if wrote_message {
@@ -146,19 +163,19 @@ impl QueueState {
         &mut self,
         packet_type: PacketType,
         msg_id: u16,
-        publisher: SessionProcess,
+        publisher: WriterProcess,
     ) {
-        println!(
-            "[Queue {}] registering confirmation {:?} {:?}",
-            self.name, packet_type, msg_id
-        );
+        // println!(
+        //     "[Queue {}] registering confirmation {:?} {:?}",
+        //     self.name, packet_type, msg_id
+        // );
         match packet_type {
             PacketType::Puback => self.buf.delete_msg(msg_id),
             PacketType::Pubrec => {
                 println!("[Queue {}] Received pubrec for msg {}", self.name, msg_id);
                 // check whether a pubrel has been received from the publisher
                 if let Some(sub) = self.buf.set_msg_state(msg_id, MessageEvent::Pubrec) {
-                    sub.request(SessionRequest::ConfirmationServer(
+                    sub.request(WriterMessage::Confirmation(
                         ConfirmationPacket::pubrel_v3(msg_id),
                         self.process.clone(),
                     ));
@@ -169,11 +186,11 @@ impl QueueState {
             PacketType::Pubrel => {
                 println!("[Queue {}] Received pubrel for msg {}", self.name, msg_id);
                 if let Some(sub) = self.buf.set_msg_state(msg_id, MessageEvent::Pubrel) {
-                    sub.request(SessionRequest::ConfirmationServer(
+                    sub.request(WriterMessage::Confirmation(
                         ConfirmationPacket::pubrel_v3(msg_id),
                         self.process.clone(),
                     ));
-                    publisher.request(SessionRequest::ConfirmationServer(
+                    publisher.request(WriterMessage::Confirmation(
                         ConfirmationPacket::pubcomp_v3(msg_id),
                         self.process.clone(),
                     ));
@@ -183,58 +200,100 @@ impl QueueState {
             t => println!("[Queue] Received other PacketType {:?} | {}", t, msg_id),
         }
     }
-}
 
-pub fn new_queue(name: String, mailbox: Mailbox<QueueRequest>) {
-    let this = process::this(&mailbox);
-    let mut q = QueueState::new(&name, this);
-    loop {
-        // q.send_messages();
-        match mailbox.receive() {
-            Ok(data) => {
-                println!("[Queue {}] Received mqtt message {:?}", name, data);
-                match data {
-                    QueueRequest::Publish(packet, client_id, publisher, protocol_version) => {
-                        // QoS 0 - fire and forget
-                        println!("SUBSCRIBERS IN LIST: {}", q.subscribers.len());
-                        match packet.qos {
-                            0 => q.handle_qos0(&packet, protocol_version),
-                            1 | 2 => q.enqueue_message(&packet, publisher, protocol_version),
-                            _ => eprintln!("Should never happen, QoS > 2"),
-                        }
-                        // for (sub, proc) in q.subscribers.iter() {
-                        //     if packet.fixed.retain {
-                        //         retained_msg = Some((packet.message_id, packet.payload.clone()));
-                        //     }
-                        //     proc.send(WriterMessage::Queue(MqttPacket::Publish(packet.clone())));
-                        // }
-                    }
-                    QueueRequest::Subscribe(qos, message_id, session, writer) => {
-                        q.subscribers
-                            .push_back((qos, session.clone(), writer.clone()));
-                        // send retained message on new subscription
-                        if let Err(e) = writer.request(WriterMessage::Suback(SubackPacket {
-                            granted: vec![],
-                            granted_reason_codes: vec![],
-                            message_id: message_id,
-                            reason_code: Some(0),
-                            properties: None,
-                        })) {
-                            eprintln!("Failed to write suback: {:?}", e)
-                        } else {
-                            q.send_messages();
-                        }
-                    }
-                    QueueRequest::Unsubscribe(unsub) => {
-                        q.subscribers
-                            .retain(|(_, session, writer)| writer.id() != unsub.id());
-                    }
-                    QueueRequest::Confirmation(packet_type, msg_id, publisher) => {
-                        q.register_confirmation(packet_type, msg_id, publisher)
-                    }
-                }
-            }
-            Err(e) => println!("[Queue {}] Error while receiving message {:?}", name, e),
+    pub fn subscribe(&mut self, qos: u8, message_id: u16, writer: WriterProcess) {
+        self.subscribers.push_back((qos, writer.clone()));
+        // send retained message on new subscription
+        if let Err(e) = writer.request(WriterMessage::Suback(SubackPacket {
+            granted: vec![],
+            granted_reason_codes: vec![],
+            message_id,
+            reason_code: Some(0),
+            properties: None,
+        })) {
+            eprintln!("Failed to write suback: {:?}", e)
+        } else {
+            self.send_messages();
         }
     }
 }
+
+impl AbstractProcess for QueueState {
+    type Arg = String;
+    type State = Self;
+
+    fn init(self_ref: ProcessRef<Self>, name: String) -> Self {
+        QueueState::new(&name, self_ref)
+    }
+}
+
+impl ProcessRequest<QueueRequest> for QueueState {
+    type Response = QueueResponse;
+
+    fn handle(state: &mut Self::State, msg: QueueRequest) -> QueueResponse {
+        match msg {
+            QueueRequest::Publish(packet, client_id, publisher, protocol_version) => {
+                // println!("SUBSCRIBERS IN LIST: {}", q.subscribers.len());
+                match packet.qos {
+                    0 => state.handle_qos0(&packet, protocol_version),
+                    1 | 2 => state.enqueue_message(&packet, publisher.clone(), protocol_version),
+                    _ => eprintln!("Should never happen, QoS > 2"),
+                }
+                QueueResponse::Success
+            }
+            QueueRequest::Subscribe(qos, message_id, writer) => {
+                state.subscribe(qos, message_id, writer.clone());
+                QueueResponse::Success
+            }
+            QueueRequest::Unsubscribe(unsub) => {
+                state
+                    .subscribers
+                    .retain(|(_, writer)| writer.id() != unsub.id());
+                QueueResponse::Success
+            }
+            QueueRequest::Confirmation(packet_type, msg_id, publisher) => {
+                state.register_confirmation(packet_type, msg_id, publisher.clone());
+                QueueResponse::Success
+            }
+        }
+    }
+}
+
+// pub fn new_queue(name: String, mailbox: Mailbox<Request<QueueRequest, QueueResponse>>) {
+//     let this = process::SelfReference::process(&mailbox);
+//     let mut q = QueueState::new(&name, this);
+//     loop {
+//         match mailbox.receive() {
+//             Ok(msg) => {
+//                 // println!("[Queue {}] Received mqtt message {:?}", name, msg.data());
+//                 match msg.data() {
+//                     QueueRequest::Publish(packet, client_id, publisher, protocol_version) => {
+//                         // println!("SUBSCRIBERS IN LIST: {}", q.subscribers.len());
+//                         match packet.qos {
+//                             0 => q.handle_qos0(&packet, protocol_version),
+//                             1 | 2 => {
+//                                 q.enqueue_message(&packet, publisher.clone(), protocol_version)
+//                             }
+//                             _ => eprintln!("Should never happen, QoS > 2"),
+//                         }
+//                         msg.reply(QueueResponse::Success);
+//                     }
+//                     QueueRequest::Subscribe(qos, message_id, writer) => {
+//                         q.subscribe(qos, message_id, writer.clone());
+//                         msg.reply(QueueResponse::Success);
+//                     }
+//                     QueueRequest::Unsubscribe(unsub) => {
+//                         q.subscribers
+//                             .retain(|(_, writer)| writer.id() != unsub.id());
+//                         msg.reply(QueueResponse::Success);
+//                     }
+//                     QueueRequest::Confirmation(packet_type, msg_id, publisher) => {
+//                         q.register_confirmation(packet_type, msg_id, publisher.clone());
+//                         msg.reply(QueueResponse::Success);
+//                     }
+//                 }
+//             }
+//             Err(e) => println!("[Queue {}] Error while receiving message {:?}", name, e),
+//         }
+//     }
+// }
