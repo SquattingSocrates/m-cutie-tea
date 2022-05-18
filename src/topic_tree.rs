@@ -1,12 +1,15 @@
 // use crate::queue::queue::new_queue;
+use crate::client::WriterProcess;
 use crate::structure::*;
-use lunatic::process;
+use lunatic::process::ProcessRef;
 use mqtt_packet_3_5::QoS;
+use std::collections::HashMap;
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct TopicTree {
-    queues: Vec<Queue>,
-    subscriptions: Vec<(u8, u16, String, WriterProcess)>,
+    counter: u128,
+    queues: HashMap<String, Queue>,
+    // subscriptions: Vec<(u8, u16, String, WriterProcess)>,
 }
 
 #[derive(PartialEq, Debug)]
@@ -257,53 +260,67 @@ impl State {
 }
 
 impl TopicTree {
-    pub fn ensure_topic_queue(&mut self, topic: &str) -> Queue {
-        if let Some(found) = self.queues.iter().position(|q| q.name == topic) {
-            self.queues.get(found).unwrap().clone()
-        } else {
+    pub fn ensure_topic_queue(&mut self, topic: &str) -> String {
+        if !self.queues.contains_key(topic) {
+            let id = self.counter;
+            self.counter += 1;
             let queue = Queue {
+                id,
                 name: topic.to_string(),
-                process: process::spawn_with(topic.to_string(), new_queue).unwrap(),
+                subscribers: Vec::new(),
             };
-            self.queues.push(queue);
-            let len = self.queues.len();
+            self.queues.insert(topic.to_string(), queue);
             // add subscribers with matching topics/wildcards
-            self.queues.get(len - 1).unwrap().clone()
         }
+        topic.to_string()
     }
 
-    pub fn get_matching_queues(&mut self, topic_pattern: &str) -> Vec<Queue> {
+    pub fn get_by_name(&mut self, topic: String) -> Queue {
+        println!("[TopicTree] getting by topic {}", topic);
+        self.ensure_topic_queue(&topic);
+        self.queues.get(&topic).unwrap().clone()
+    }
+
+    pub fn get_by_id(&mut self, queue_id: u128) -> &mut Queue {
+        println!("[TopicTree] getting by id {}", queue_id);
+        self.queues
+            .values_mut()
+            .filter(|q| q.id == queue_id)
+            .next()
+            .unwrap()
+    }
+
+    pub fn get_matching_queue_names(&mut self, topic_pattern: &str) -> Vec<String> {
         if topic_pattern.contains(&['+', '#'][..]) {
             return self.match_wildcard_subscriptions(topic_pattern);
         }
         vec![self.ensure_topic_queue(topic_pattern)]
     }
 
-    pub fn match_wildcard_subscriptions(&mut self, wildcard: &str) -> Vec<Queue> {
-        let keys: Vec<String> = self
-            .queues
+    pub fn match_wildcard_subscriptions(&mut self, wildcard: &str) -> Vec<String> {
+        self.queues
             .iter()
-            .filter_map(|q| {
+            .filter_map(|(_, q)| {
                 if State::match_topic(wildcard, &q.name) {
                     Some(q.name.clone())
                 } else {
                     None
                 }
             })
-            .collect();
-        keys.iter()
-            .map(|key| self.ensure_topic_queue(key))
-            .collect::<Vec<Queue>>()
+            .collect()
+        // keys.iter()
+        //     .map(|key| self.ensure_topic_queue(key))
+        //     .collect::<Vec<Queue>>()
     }
 
-    pub fn add_subscriber(
-        &mut self,
-        qos: u8,
-        message_id: u16,
-        topic: String,
-        writer: WriterProcess,
-    ) {
-        self.subscriptions.push((qos, message_id, topic, writer));
+    pub fn add_subscriptions(&mut self, topic: String, writer: ProcessRef<WriterProcess>) {
+        for q in self.get_matching_queue_names(&topic) {
+            self.queues
+                .get_mut(&q)
+                .unwrap()
+                .subscribers
+                .push(writer.clone());
+        }
     }
 }
 
