@@ -49,11 +49,35 @@ pub struct Queue {
     pub subscribers: Vec<ProcessRef<WriterProcess>>,
 }
 
-pub struct QueueMessage {
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum QueueMessage {
+    Publish(PublishMessage),
+    Confirmation(ConfirmationMessage),
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PublishMessage {
     pub message_id: Uuid,
     pub packet: PublishPacket,
     pub queue_id: u128,
     pub in_progress: bool,
+    pub sent: bool,
+    pub sender: ProcessRef<WriterProcess>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct PublishJob {
+    pub message: PublishMessage,
+    pub queue: Queue,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ConfirmationMessage {
+    // pub message_id: Uuid,
+    pub packet: ConfirmationPacket,
+    pub message_id: u16,
+    pub in_progress: bool,
+    pub send_to: ProcessRef<WriterProcess>,
 }
 
 // #[derive(Debug, Serialize, Deserialize)]

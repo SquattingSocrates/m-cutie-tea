@@ -65,7 +65,7 @@ impl AbstractProcess for ClientProcess {
                                     coordinator.request(Subscribe(sub, writer.clone()));
                                 }
                                 MqttPacket::Publish(packet) => {
-                                    coordinator.request(Publish(packet));
+                                    coordinator.request(Publish(packet, writer.clone()));
                                 }
                                 MqttPacket::Pingreq => {
                                     if writer.request(MqttPacket::Pingresp) {
@@ -73,6 +73,9 @@ impl AbstractProcess for ClientProcess {
                                     } else {
                                         eprintln!("Failed to send pong");
                                     }
+                                }
+                                MqttPacket::Puback(packet) | MqttPacket::Pubrel(packet) => {
+                                    coordinator.request(packet);
                                 }
                                 other => println!("Received other packet {:?}", other),
                             }

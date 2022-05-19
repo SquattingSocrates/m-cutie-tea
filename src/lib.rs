@@ -3,6 +3,7 @@
 pub mod coordinator;
 // pub mod session;
 pub mod client;
+pub mod persistence;
 pub mod structure;
 pub mod topic_tree;
 pub mod worker;
