@@ -11,6 +11,7 @@ use mqtt_packet_3_5::{
     SubscribePacket,
 };
 use serde::{Deserialize, Serialize};
+use std::time::SystemTime;
 use uuid::Uuid;
 
 // pub type WriterProcess = ProcessRef<W>;
@@ -63,6 +64,7 @@ pub struct PublishMessage {
     pub in_progress: bool,
     pub sent: bool,
     pub sender: ProcessRef<WriterProcess>,
+    pub started_at: SystemTime,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -73,11 +75,12 @@ pub struct PublishJob {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ConfirmationMessage {
-    // pub message_id: Uuid,
+    pub message_uuid: Uuid,
     pub packet: ConfirmationPacket,
     pub message_id: u16,
     pub in_progress: bool,
     pub send_to: ProcessRef<WriterProcess>,
+    pub started_at: SystemTime,
 }
 
 // #[derive(Debug, Serialize, Deserialize)]

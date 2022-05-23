@@ -8,7 +8,25 @@ use lunatic::{net::TcpListener, process::StartProcess, Mailbox, ProcessConfig};
 // use mqtt_broker::broker;
 use mqtt_broker::client::ClientProcess;
 use mqtt_broker::coordinator::CoordinatorSup;
+use mqtt_broker::http_helper;
+use mqtt_broker::metrics::MetricsSup;
 use mqtt_broker::worker;
+
+#[macro_use]
+extern crate lazy_static;
+
+// setup routing map
+use std::collections::HashMap;
+
+lazy_static! {
+    static ref HASHMAP: HashMap<u32, &'static str> = {
+        let mut m = HashMap::new();
+        m.insert(0, "foo");
+        m.insert(1, "bar");
+        m.insert(2, "baz");
+        m
+    };
+}
 
 // fn write_to_file() {
 //     // Create a path to the desired file
@@ -41,6 +59,7 @@ fn main() {
     // let client_module = client_env.add_this_module().unwrap();
 
     // Create a coordinator supervisor and register the coordinator under the "coordinator" name.
+    MetricsSup::start_link("metrics".to_owned(), None);
     CoordinatorSup::start_link("coordinator".to_owned(), None);
 
     // start single worker
@@ -50,6 +69,9 @@ fn main() {
     println!("Started server on port {}", port);
     let address = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(address).unwrap();
+
+    // start http endpoint
+    http_helper::HttpTransaction::start_server();
 
     // Limit client's memory usage to 5 Mb & allow sub-processes.
     let mut client_conf = ProcessConfig::new();

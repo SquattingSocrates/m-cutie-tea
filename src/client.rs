@@ -5,6 +5,7 @@ use mqtt_packet_3_5::{
 };
 use serde::{Deserialize, Serialize};
 use std::io::Write;
+use std::time::SystemTime;
 
 use crate::coordinator::{self, CoordinatorProcess, Publish, Subscribe};
 
@@ -55,6 +56,7 @@ impl AbstractProcess for ClientProcess {
             ),
             |(client, stream, writer, connect_packet, coordinator), _: Mailbox<()>| {
                 let mut reader = PacketDecoder::from_stream(stream);
+                let started_at = SystemTime::now();
 
                 loop {
                     match reader.decode_packet(connect_packet.protocol_version) {
@@ -65,7 +67,11 @@ impl AbstractProcess for ClientProcess {
                                     coordinator.request(Subscribe(sub, writer.clone()));
                                 }
                                 MqttPacket::Publish(packet) => {
-                                    coordinator.request(Publish(packet, writer.clone()));
+                                    coordinator.request(Publish(
+                                        packet,
+                                        writer.clone(),
+                                        started_at,
+                                    ));
                                 }
                                 MqttPacket::Pingreq => {
                                     if writer.request(MqttPacket::Pingresp) {

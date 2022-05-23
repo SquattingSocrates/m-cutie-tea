@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 
 use crate::client::{ClientProcess, WriterProcess};
+use crate::metrics::{self, MetricsProcess};
 use crate::persistence::FileLog;
 use crate::structure::{ConfirmationMessage, PublishJob, PublishMessage, QueueMessage};
 use crate::topic_tree::TopicTree;
 use lunatic::{
     host,
-    process::{AbstractProcess, ProcessMessage, ProcessRef, ProcessRequest, Request, StartProcess},
+    process::{AbstractProcess, Message, ProcessMessage, ProcessRef, ProcessRequest, Request},
     supervisor::Supervisor,
 };
 use mqtt_packet_3_5::{
@@ -14,6 +15,7 @@ use mqtt_packet_3_5::{
     SubscribePacket,
 };
 use serde::{Deserialize, Serialize};
+use std::time::SystemTime;
 use uuid::Uuid;
 
 // A reference to a client that joined the server.
@@ -41,6 +43,7 @@ pub struct CoordinatorProcess {
     topic_tree: TopicTree,
     wal: FileLog,
     waiting_qos1: HashMap<u16, bool>, // channels: HashMap<String, (ProcessRef<ChannelProcess>, usize)>,
+    metrics: ProcessRef<MetricsProcess>,
 }
 
 impl CoordinatorProcess {
@@ -71,11 +74,25 @@ impl CoordinatorProcess {
     //     });
     // }
 
-    pub fn get_by_message_id(&mut self, message_id: u16) -> Option<&mut PublishMessage> {
+    pub fn get_by_message_id_mut(&mut self, message_id: u16) -> Option<&mut PublishMessage> {
         for msg in self.messages.iter_mut() {
             if let QueueMessage::Publish(p) = msg {
                 if p.packet.message_id != Some(message_id) {
                     return Some(p);
+                }
+            }
+        }
+        None
+    }
+
+    pub fn get_publish_metadata(
+        &mut self,
+        message_id: u16,
+    ) -> Option<(Uuid, ProcessRef<WriterProcess>, SystemTime)> {
+        for msg in self.messages.iter() {
+            if let QueueMessage::Publish(p) = msg {
+                if p.packet.message_id != Some(message_id) {
+                    return Some((p.message_id, p.sender.clone(), p.started_at));
                 }
             }
         }
@@ -97,6 +114,7 @@ impl AbstractProcess for CoordinatorProcess {
             clients: HashMap::new(),
             wal: FileLog::new("persistence", "backup.log"),
             waiting_qos1: HashMap::new(),
+            metrics: ProcessRef::<MetricsProcess>::lookup("metrics").unwrap(),
         }
     }
 }
@@ -117,7 +135,7 @@ impl ProcessRequest<Connect> for CoordinatorProcess {
         state
             .clients
             .insert(writer.uuid(), Client { client, writer });
-
+        state.metrics.send(metrics::Connect);
         true
     }
 }
@@ -167,13 +185,20 @@ impl ProcessRequest<Subscribe> for CoordinatorProcess {
 
 /// Publish message
 #[derive(Serialize, Deserialize)]
-pub struct Publish(pub PublishPacket, pub ProcessRef<WriterProcess>);
+pub struct Publish(
+    pub PublishPacket,
+    pub ProcessRef<WriterProcess>,
+    pub SystemTime,
+);
 impl ProcessRequest<Publish> for CoordinatorProcess {
     type Response = bool;
 
-    fn handle(state: &mut CoordinatorProcess, Publish(packet, writer): Publish) -> Self::Response {
+    fn handle(
+        state: &mut CoordinatorProcess,
+        Publish(packet, writer, started_at): Publish,
+    ) -> Self::Response {
         if packet.qos > 0 {
-            state.wal.append_publish(packet.clone());
+            state.wal.append_publish(packet.clone(), started_at);
         }
         let queue = state.topic_tree.get_by_name(packet.topic.clone());
         println!(
@@ -187,6 +212,7 @@ impl ProcessRequest<Publish> for CoordinatorProcess {
             in_progress: false,
             sent: false,
             sender: writer,
+            started_at,
         }));
         true
     }
@@ -210,7 +236,8 @@ impl ProcessRequest<ConfirmationPacket> for CoordinatorProcess {
                 "[Coordinator->Confirmation] Wrote to WAL, getting sender {} {:?}",
                 message_id, state.messages
             );
-            let orig_sender = state.get_by_message_id(message_id).unwrap().sender.clone();
+            let (message_uuid, sender, started_at) =
+                state.get_publish_metadata(message_id).unwrap();
 
             // state.messages.retain(|msg| {
             //     if let QueueMessage::Publish(p) = msg {
@@ -224,7 +251,9 @@ impl ProcessRequest<ConfirmationPacket> for CoordinatorProcess {
                     message_id,
                     packet,
                     in_progress: false,
-                    send_to: orig_sender,
+                    send_to: sender,
+                    started_at,
+                    message_uuid,
                 }));
             println!(
                 "[Coordinator->Confirmation] Added PUBACK for {}. Releasing message {:?}",
@@ -294,11 +323,23 @@ impl ProcessRequest<Poll> for CoordinatorProcess {
 
 /// Release Message from queue
 #[derive(Serialize, Deserialize)]
-pub struct Release(pub Uuid);
+pub struct Release(
+    pub Uuid,
+    /// QoS
+    pub u8,
+    /// message_id of message with QoS > 0
+    pub Option<u16>,
+);
 impl ProcessRequest<Release> for CoordinatorProcess {
     type Response = bool;
 
-    fn handle(state: &mut CoordinatorProcess, Release(id): Release) -> Self::Response {
+    fn handle(
+        state: &mut CoordinatorProcess,
+        Release(id, qos, message_id): Release,
+    ) -> Self::Response {
+        if qos > 0 {
+            state.wal.append_completion(qos, message_id.unwrap());
+        }
         state.drop_message_uuid(id);
         true
     }
@@ -312,7 +353,7 @@ impl ProcessRequest<Sent> for CoordinatorProcess {
 
     fn handle(state: &mut CoordinatorProcess, Sent(id, qos): Sent) -> Self::Response {
         state.wal.append_sent(id, qos);
-        if let Some(msg) = state.get_by_message_id(id) {
+        if let Some(msg) = state.get_by_message_id_mut(id) {
             // write to log and mark message as sent
             msg.sent = true;
             return true;

@@ -6,9 +6,15 @@ version = "0.1.0"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+http = "0.2"
+http-body = "0.4"
+httparse = "1.7.1"
+httpdate = "1.0"
+lazy_static = "1.4.0"
 lunatic = "0.9.1"
 mqtt_packet_3_5 = {version = "0.2.2", features = ["serde_support"]}
 num = "0.4.0"
+prometheus = "0.13.0"
 queue-file = "1.1"
 serde = "1.0.132"
 uuid = {version = "1.0.0", features = ["v4", "serde"]}
