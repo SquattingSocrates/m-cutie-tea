@@ -1,18 +1,17 @@
+use crate::structure::WriterRef;
 use lunatic::process::{AbstractProcess, ProcessRef, ProcessRequest, Request, StartProcess};
 use lunatic::{net::TcpStream, Mailbox, Process};
-use mqtt_packet_3_5::{
-    ConnackPacket, ConnectPacket, MqttPacket, Packet, PacketDecoder, PublishPacket,
-};
-use serde::{Deserialize, Serialize};
+use mqtt_packet_3_5::{ConnackPacket, ConnectPacket, MqttPacket, PacketDecoder};
 use std::io::Write;
 use std::time::SystemTime;
+use uuid::Uuid;
 
 use crate::coordinator::{self, CoordinatorProcess, Publish, Subscribe};
 
 pub struct ClientProcess {
     this: ProcessRef<ClientProcess>,
     coordinator: ProcessRef<CoordinatorProcess>,
-    writer: ProcessRef<WriterProcess>,
+    writer: WriterRef,
     connect_packet: ConnectPacket,
     // pub reader: PacketDecoder<TcpStream>,
     // protocol_version: u8,
@@ -40,23 +39,30 @@ impl AbstractProcess for ClientProcess {
 
         let writer = WriterProcess::start((stream.clone(), connect_packet.clone()), None);
         // Let the coordinator know that we joined.
-        let client_info = coordinator.request(coordinator::Connect(
+        let writer_ref = WriterRef {
+            process: Some(writer.clone()),
+            client_id: connect_packet.client_id.clone(),
+            session_id: Uuid::new_v4(),
+            is_persistent_session: !connect_packet.clean_session,
+        };
+        let _ = coordinator.request(coordinator::Connect(
             this.clone(),
-            writer.clone(),
+            writer_ref.clone(),
             connect_packet.clean_session,
         ));
 
         Process::spawn_link(
             (
                 this.clone(),
-                stream.clone(),
-                writer.clone(),
+                stream,
+                writer_ref.clone(),
                 connect_packet.clone(),
                 coordinator.clone(),
             ),
-            |(client, stream, writer, connect_packet, coordinator), _: Mailbox<()>| {
+            |(_, stream, writer_ref, connect_packet, coordinator), _: Mailbox<()>| {
                 let mut reader = PacketDecoder::from_stream(stream);
                 let started_at = SystemTime::now();
+                let writer = writer_ref.process.as_ref().unwrap();
 
                 loop {
                     match reader.decode_packet(connect_packet.protocol_version) {
@@ -64,12 +70,12 @@ impl AbstractProcess for ClientProcess {
                             println!("Received packet {:?}", message);
                             match message {
                                 MqttPacket::Subscribe(sub) => {
-                                    coordinator.request(Subscribe(sub, writer.clone()));
+                                    coordinator.request(Subscribe(sub, writer_ref.clone()));
                                 }
                                 MqttPacket::Publish(packet) => {
                                     coordinator.request(Publish(
                                         packet,
-                                        writer.clone(),
+                                        writer_ref.clone(),
                                         started_at,
                                     ));
                                 }
@@ -104,9 +110,9 @@ impl AbstractProcess for ClientProcess {
         }));
 
         ClientProcess {
-            this: this.clone(),
-            coordinator: coordinator.clone(),
-            writer,
+            this,
+            coordinator,
+            writer: writer_ref,
             connect_packet,
             is_v5,
             client_id,
@@ -128,7 +134,7 @@ impl AbstractProcess for WriterProcess {
     type Arg = (TcpStream, ConnectPacket);
     type State = Self;
 
-    fn init(this: ProcessRef<Self>, (stream, connect_packet): Self::Arg) -> Self::State {
+    fn init(_: ProcessRef<Self>, (stream, connect_packet): Self::Arg) -> Self::State {
         let client_id = connect_packet.client_id.clone();
         let is_v5 = connect_packet.protocol_version == 5;
         WriterProcess {

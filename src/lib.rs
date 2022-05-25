@@ -4,7 +4,7 @@ pub mod coordinator;
 // pub mod session;
 pub mod client;
 pub mod http_helper;
-pub mod inspect;
+// pub mod inspect;
 pub mod metrics;
 pub mod persistence;
 pub mod structure;

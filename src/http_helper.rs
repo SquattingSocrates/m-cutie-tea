@@ -1,5 +1,5 @@
 use crate::metrics::{Gather, MetricsProcess};
-use http::{response::Builder, Request, Response, StatusCode};
+use http::{response::Builder, Request, Response};
 use httparse;
 use lunatic::{
     net::{TcpListener, TcpStream},
@@ -21,11 +21,12 @@ impl HttpTransaction {
             while let Ok((stream, _)) = listener.accept() {
                 Process::spawn_link(stream, |stream: TcpStream, _: Mailbox<()>| {
                     let metrics = ProcessRef::<MetricsProcess>::lookup("metrics").unwrap();
-                    let mut transaction = Self::parse_request(stream);
+                    let transaction = Self::parse_request(stream);
                     let body = metrics.request(Gather);
-                    let mut res = transaction
+                    let res = transaction
                         .response
                         .version(transaction.request.version())
+                        .header("Content-Length", body.len())
                         .status(200)
                         .body::<Vec<u8>>(body)
                         .unwrap();
@@ -56,18 +57,18 @@ impl HttpTransaction {
         }
         // separator between header and data
         write!(&mut stream, "\r\n")?;
-        stream.write_all(response.body());
+        stream.write_all(response.body())?;
         Ok(())
     }
 
     pub fn parse_request(mut stream: TcpStream) -> HttpTransaction {
         let mut headers = [httparse::EMPTY_HEADER; 16];
-        let mut buf = [0 as u8; 200];
+        let mut buf = [0; 200];
         if let Err(e) = stream.read(&mut buf) {
             panic!("[http reader] Failed to read from tcp stream {:?}", e);
         }
         let mut req = httparse::Request::new(&mut headers);
-        let offset = req.parse(&mut buf).unwrap();
+        let offset = req.parse(&buf).unwrap();
         if let (true, None) = (offset.is_partial(), req.path) {
             panic!("[http reader] Failed to read request");
         }
@@ -77,7 +78,7 @@ impl HttpTransaction {
             .uri(req.path.unwrap());
         println!("[http reader] GOT THESE HEADERS {:?}", req);
         for h in req.headers {
-            if h.name == "" {
+            if h.name.is_empty() {
                 break;
             }
             request_builder = request_builder.header(h.name, h.value);

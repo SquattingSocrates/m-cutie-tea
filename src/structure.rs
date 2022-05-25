@@ -1,53 +1,26 @@
-// use super::broker::Broker;
-// use super::queue::queue::QueueState;
-// use super::session::tcp_writer::TcpWriter;
 use crate::client::WriterProcess;
-use lunatic::{
-    net::TcpStream,
-    process::{ProcessRef, Request},
-};
-use mqtt_packet_3_5::{
-    ConfirmationPacket, ConnackPacket, ConnectPacket, PacketType, PublishPacket, SubackPacket,
-    SubscribePacket,
-};
+use lunatic::process::ProcessRef;
+use mqtt_packet_3_5::{ConfirmationPacket, PublishPacket};
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 use uuid::Uuid;
-
-// pub type WriterProcess = ProcessRef<W>;
-// pub type ReaderProcess = ProcessRef<()>;
-// pub type BrokerProcess = ProcessRef<Broker>;
-// pub type QueueProcess = ProcessRef<QueueState>;
-
-// #[derive(Debug, Serialize, Deserialize)]
-// pub enum QueueRequest {
-//     /// WriterProcess is necessary for sending responses like Puback, Pubrel etc
-//     Publish(PublishPacket, String, WriterProcess, u8),
-//     /// Send Matching subscription index as well as the subscribe packet and
-//     /// writer process
-//     Subscribe(u8, u16, WriterProcess),
-//     /// Send only client_id
-//     Unsubscribe(WriterProcess),
-//     /// request type for PUBACK, PUBREL, PUBREC and PUBCOMP
-//     Confirmation(PacketType, u16, WriterProcess),
-// }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum QueueResponse {
     Success,
 }
 
-// pub struct WriterProcess {
-//     pub is_receiving: bool,
-//     stream: TcpStream,
-//     connect_packet: ConnectPacket,
-// }
-
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct Queue {
     pub id: u128,
     pub name: String,
-    pub subscribers: Vec<ProcessRef<WriterProcess>>,
+    pub subscribers: Vec<WriterRef>,
+}
+
+impl Queue {
+    pub fn drop_inactive_subs(&mut self, inactive_subs: Vec<WriterRef>) {
+        self.subscribers.retain(|sub| !inactive_subs.contains(sub));
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -58,13 +31,21 @@ pub enum QueueMessage {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PublishMessage {
-    pub message_id: Uuid,
+    pub message_uuid: Uuid,
     pub packet: PublishPacket,
     pub queue_id: u128,
     pub in_progress: bool,
     pub sent: bool,
-    pub sender: ProcessRef<WriterProcess>,
+    pub sender: WriterRef,
     pub started_at: SystemTime,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct WriterRef {
+    pub process: Option<ProcessRef<WriterProcess>>,
+    pub client_id: String,
+    pub session_id: Uuid,
+    pub is_persistent_session: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -79,114 +60,6 @@ pub struct ConfirmationMessage {
     pub packet: ConfirmationPacket,
     pub message_id: u16,
     pub in_progress: bool,
-    pub send_to: ProcessRef<WriterProcess>,
+    pub send_to: WriterRef,
     pub started_at: SystemTime,
 }
-
-// #[derive(Debug, Serialize, Deserialize)]
-// pub enum BrokerRequest {
-//     /// Request Queue Process for publishing by topic name
-//     GetQueue(String),
-//     Subscribe(SubscribePacket, WriterProcess),
-//     MoveToExistingSession(SessionConfig),
-//     /// Receives client_id and registers new Process
-//     RegisterSession(String, ReaderProcess),
-//     DestroySession(String),
-// }
-
-// #[derive(Debug, Serialize, Deserialize)]
-// pub enum BrokerResponse {
-//     MatchingQueue(Queue),
-//     Subscribed,
-//     Registered,
-//     ExistingSession(Option<ReaderProcess>),
-//     Destroyed,
-// }
-
-// // #[derive(Debug, Serialize, Deserialize, Clone)]
-// // pub struct Queue {
-// //     pub name: String,
-// //     pub process: QueueProcess,
-// // }
-
-// #[derive(Serialize, Deserialize, Debug)]
-// pub enum ConnectionMessage {
-//     Ping,
-//     Disconnect,
-//     Connect(u8),
-//     Destroy,
-// }
-
-// #[derive(Serialize, Deserialize, Debug)]
-// pub enum WriterMessage {
-//     Connack(ConnackPacket),
-//     Suback(SubackPacket),
-//     Unsuback(u16),
-//     Publish(u8, u16, Vec<u8>, QueueProcess),
-//     Confirmation(ConfirmationPacket, QueueProcess),
-//     Pong,
-//     Die,
-//     GetQueue(u16),
-// }
-
-// #[derive(Serialize, Deserialize, Debug)]
-// pub enum WriterResponse {
-//     Success,
-//     Sent,
-//     Failed,
-//     MatchingQueue(QueueProcess),
-// }
-
-// #[derive(Serialize, Deserialize, Debug, Clone)]
-// pub struct SessionConfig {
-//     pub stream: net::TcpStream,
-//     pub connect_packet: ConnectPacket,
-// }
-
-// #[derive(Serialize, Deserialize, Debug)]
-// pub enum PostOfficeRequest {
-//     Publish(u16, Vec<u8>),
-// }
-
-// #[derive(Debug, PartialEq)]
-// pub enum MessageEvent {
-//     Send,
-//     /// Receive Pubrel from publisher
-//     Pubrel,
-//     /// Receive Pubrec from subscriber
-//     Pubrec,
-// }
-
-// #[derive(Debug, PartialEq)]
-// pub enum MessageState {
-//     /// Ready is the initial state of all messages
-//     Ready,
-//     /// Sent is actually only relevant for QoS 2. It means the message
-//     /// has been published and a PUBREC has been sent to the publisher
-//     /// It can transition to Released IFF we receive a PUBREC from the subscriber
-//     Sent,
-//     /// Waiting means that a PUBREL from the Publisher arrived before the PUBREC
-//     /// of the Subscriber
-//     Waiting,
-//     /// Essentially means that a PUBREC from the subscriber has been received
-//     Released,
-//     /// Received marks messages as deletable, whether it's set through an PUBACK
-//     /// or a PUBREC from the subscriber
-//     Received,
-// }
-
-// impl MessageState {
-//     pub fn transition(&self, event: MessageEvent) -> MessageState {
-//         match (self, &event) {
-//             (MessageState::Ready, MessageEvent::Send) => MessageState::Sent,
-//             (MessageState::Sent, MessageEvent::Pubrec) => MessageState::Received,
-//             (MessageState::Sent, MessageEvent::Pubrel) => MessageState::Waiting,
-//             (MessageState::Waiting, MessageEvent::Pubrec) => MessageState::Released,
-//             (MessageState::Received, MessageEvent::Pubrel) => MessageState::Released,
-//             _ => panic!(
-//                 "Invalid combination of message state and event {:?} | {:?}",
-//                 self, event
-//             ),
-//         }
-//     }
-// }

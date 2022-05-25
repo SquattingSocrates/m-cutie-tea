@@ -1,15 +1,10 @@
-// use crate::queue::queue::new_queue;
-use crate::client::WriterProcess;
 use crate::structure::*;
-use lunatic::process::ProcessRef;
-use mqtt_packet_3_5::QoS;
 use std::collections::HashMap;
 
 #[derive(Default, Debug)]
 pub struct TopicTree {
     counter: u128,
     queues: HashMap<String, Queue>,
-    // subscriptions: Vec<(u8, u16, String, WriterProcess)>,
 }
 
 #[derive(PartialEq, Debug)]
@@ -283,11 +278,7 @@ impl TopicTree {
 
     pub fn get_by_id(&mut self, queue_id: u128) -> &mut Queue {
         println!("[TopicTree] getting by id {}", queue_id);
-        self.queues
-            .values_mut()
-            .filter(|q| q.id == queue_id)
-            .next()
-            .unwrap()
+        self.queues.values_mut().find(|q| q.id == queue_id).unwrap()
     }
 
     pub fn get_matching_queue_names(&mut self, topic_pattern: &str) -> Vec<String> {
@@ -313,7 +304,7 @@ impl TopicTree {
         //     .collect::<Vec<Queue>>()
     }
 
-    pub fn add_subscriptions(&mut self, topic: String, writer: ProcessRef<WriterProcess>) {
+    pub fn add_subscriptions(&mut self, topic: String, writer: WriterRef) {
         for q in self.get_matching_queue_names(&topic) {
             self.queues
                 .get_mut(&q)

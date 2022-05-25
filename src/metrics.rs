@@ -1,6 +1,6 @@
 use lunatic::{
     host,
-    process::{AbstractProcess, ProcessMessage, ProcessRef, ProcessRequest, Request, StartProcess},
+    process::{AbstractProcess, ProcessMessage, ProcessRef, ProcessRequest},
     supervisor::Supervisor,
 };
 use prometheus::{Encoder, Histogram, HistogramOpts, IntCounter, IntGauge, Registry, TextEncoder};
