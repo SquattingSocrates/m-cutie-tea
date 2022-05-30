@@ -5,7 +5,7 @@ use crate::metrics::{self, MetricsProcess};
 use crate::persistence::{self, FileLog};
 use crate::structure::{
     Client, CompletionMessage, ConfirmationMessage, PublishContext, PublishJob, PublishMessage,
-    QueueMessage, Receiver, WriterRef,
+    QueueMessage, Receiver, ReleaseMessage, WriterRef,
 };
 use crate::topic_tree::TopicTree;
 use lunatic::{
@@ -27,8 +27,9 @@ pub struct MessageStore {
     messages: HashMap<Uuid, PublishContext>,
     waiting_qos1: HashMap<u16, bool>, // channels: HashMap<String, (ProcessRef<ChannelProcess>, usize)>,
     waiting_qos2: HashMap<u16, bool>,
+    waiting_release_qos2: HashMap<u16, bool>,
     message_ids: HashMap<u16, Uuid>,
-    qos2_message_released: HashMap<u16, bool>,
+    qos2_message_release: HashMap<Uuid, ReleaseMessage>,
 }
 
 impl MessageStore {
@@ -43,8 +44,9 @@ impl MessageStore {
             message_queue,
             waiting_qos1: HashMap::new(),
             waiting_qos2: HashMap::new(),
+            waiting_release_qos2: HashMap::new(),
             message_ids,
-            qos2_message_released: HashMap::new(),
+            qos2_message_release: HashMap::new(),
         }
     }
 
@@ -53,11 +55,25 @@ impl MessageStore {
             QueueMessage::Publish(p) => p.message_uuid != message_uuid,
             QueueMessage::Confirmation(c) => c.message_uuid != message_uuid,
             QueueMessage::Complete(complete) => complete.message_uuid != message_uuid,
+            QueueMessage::Release(release) => release.message_uuid != message_uuid,
         });
     }
 
     pub fn drop_messages_by_uuid(&mut self, message_uuid: Uuid) {
         MessageStore::delete_messages_by_uuid(&mut self.message_queue, message_uuid)
+    }
+
+    pub fn cleanup_message(&mut self, message_uuid: Uuid, message_id: u16, qos: u8) {
+        MessageStore::delete_messages_by_uuid(&mut self.message_queue, message_uuid);
+        if qos == 1 {
+            self.waiting_qos1.remove(&message_id);
+        } else if qos == 2 {
+            self.waiting_qos2.remove(&message_id);
+            self.waiting_release_qos2.remove(&message_id);
+        }
+        self.message_ids.remove(&message_id);
+        self.qos2_message_release.remove(&message_uuid);
+        self.messages.remove(&message_uuid);
     }
 
     pub fn drop_publish_message_id(&mut self, message_id: u16) {
@@ -251,21 +267,62 @@ impl MessageStore {
         subscriber: WriterRef,
     ) {
         self.drop_publish_message_id(message_id);
-        self.qos2_message_released.insert(message_id, true);
+        println!(
+            "[MessageStore] Calling delete_qos2_message(pubrec) {:?}",
+            message_uuid
+        );
+        self.upsert_release_message(message_id, message_uuid, true);
+    }
+
+    fn upsert_release_message(&mut self, message_id: u16, message_uuid: Uuid, is_pubrec: bool) {
+        if let Some(msg) = self.qos2_message_release.get_mut(&message_uuid) {
+            println!(
+                "[MessageStore] Found matching release matching, needs updating. is_pubrec: {} | {:?}",
+                is_pubrec, msg,
+            );
+            // if a message already exists we want to set the other one
+            // to true, this way both end up being true
+            msg.pubrec_received = true;
+            msg.pubrel_received = true;
+            self.message_queue.push(QueueMessage::Release(msg.clone()));
+        } else {
+            println!(
+                "[MessageStore] Creating new ReleaseMessage {:?}",
+                ReleaseMessage {
+                    message_id,
+                    message_uuid,
+                    pubrec_received: is_pubrec,
+                    pubrel_received: !is_pubrec,
+                }
+            );
+            self.qos2_message_release.insert(
+                message_uuid,
+                ReleaseMessage {
+                    message_id,
+                    message_uuid,
+                    pubrec_received: is_pubrec,
+                    pubrel_received: !is_pubrec,
+                },
+            );
+        }
     }
 
     /// mark message as to be released
-    pub fn mark_to_be_released(&mut self, message_id: u16) {
-        self.qos2_message_released.insert(message_id, false);
+    pub fn mark_to_be_released(&mut self, message_id: u16, message_uuid: Uuid) {
+        println!(
+            "[MessageStore] Calling mark_to_be_released {}",
+            message_uuid
+        );
+        self.upsert_release_message(message_id, message_uuid, false);
     }
 
     /// check if message is good to be released
-    pub fn is_released(&self, message_id: u16) -> bool {
-        if let Some(true) = self.qos2_message_released.get(&message_id) {
-            return true;
-        }
-        false
-    }
+    // pub fn is_released(&self, message_id: u16) -> bool {
+    //     if let Some(true) = self.qos2_message_released.get(&message_id) {
+    //         return true;
+    //     }
+    //     false
+    // }
 
     /// helper method to create new completion message that will be picked up
     /// by a worker eventually
@@ -365,7 +422,9 @@ impl MessageStore {
                         //     return PollResponse::Confirmation(confirm.clone());
                         // }
                     }
+                    // TODO: handle state of messages if complete and release have been encountered
                     QueueMessage::Complete(_) => {}
+                    QueueMessage::Release(_) => {}
                 }
             }
         }
@@ -387,6 +446,9 @@ impl MessageStore {
                             continue;
                         }
                         publish.in_progress = true;
+                        if let None = publish_context.sender.process {
+                            return PollResponse::None;
+                        }
                         return PollResponse::Publish(
                             PublishJob {
                                 message: publish.clone(),
@@ -411,6 +473,9 @@ impl MessageStore {
                         // mark qos1 message as waiting to prevent sending puback multiple times
                         self.waiting_qos1.insert(confirm.message_id, true);
                         let publish_context = self.messages.get(&confirm.message_uuid).unwrap();
+                        if let None = publish_context.sender.process {
+                            return PollResponse::None;
+                        }
                         return PollResponse::Confirmation(
                             confirm.clone(),
                             publish_context.clone(),
@@ -428,7 +493,29 @@ impl MessageStore {
                         // mark qos1 message as waiting to prevent sending puback multiple times
                         self.waiting_qos2.insert(complete.message_id, true);
                         let publish_context = self.messages.get(&complete.message_uuid).unwrap();
+                        if let None = publish_context.sender.process {
+                            return PollResponse::None;
+                        }
                         return PollResponse::Complete(complete.clone(), publish_context.clone());
+                    }
+                }
+                QueueMessage::Release(release) => {
+                    println!(
+                        "[Coordinator->Poll] Checking Release message {:?} | {:?}",
+                        release,
+                        self.waiting_release_qos2.contains_key(&release.message_id)
+                    );
+                    if release.pubrel_received
+                        && release.pubrec_received
+                        && !self.waiting_release_qos2.contains_key(&release.message_id)
+                    {
+                        // mark qos1 message as waiting to prevent sending puback multiple times
+                        self.waiting_release_qos2.insert(release.message_id, true);
+                        let publish_context = self.messages.get(&release.message_uuid).unwrap();
+                        if let None = publish_context.sender.process {
+                            return PollResponse::None;
+                        }
+                        return PollResponse::Release(release.clone(), publish_context.clone());
                     }
                 }
             }

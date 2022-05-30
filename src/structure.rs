@@ -28,6 +28,15 @@ pub enum QueueMessage {
     Publish(PublishMessage),
     Confirmation(ConfirmationMessage),
     Complete(CompletionMessage),
+    Release(ReleaseMessage),
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ReleaseMessage {
+    pub message_id: u16,
+    pub message_uuid: Uuid,
+    pub pubrec_received: bool,
+    pub pubrel_received: bool,
 }
 
 /// A PublishMessage is what we have in the queue

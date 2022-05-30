@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use crate::coordinator::{CoordinatorProcess, Poll, PollResponse, Release, RetryLater, Sent};
+use crate::coordinator::{
+    Cleanup, CoordinatorProcess, Poll, PollResponse, Release, RetryLater, Sent,
+};
 use crate::metrics::{self, MetricsProcess};
 use crate::structure::{PublishContext, PublishJob, Receiver, WriterRef};
 use lunatic::{
@@ -164,6 +166,43 @@ pub fn worker_process() {
                             vec![],
                             vec![complete.receiver.clone()],
                         ));
+                    }
+                }
+                PollResponse::Release(release, ctx) => {
+                    println!(
+                        "[Worker->Complete] received release(pubcomp) for message {} to process {:?}",
+                        release.message_id, ctx.sender
+                    );
+                    // send pubrel to receiver
+                    for rec in ctx.receivers.iter() {
+                        if let Some(w) = &rec.writer.process {
+                            if w.request(MqttPacket::Pubrel(ConfirmationPacket {
+                                cmd: PacketType::Pubrel,
+                                message_id: release.message_id,
+                                properties: None,
+                                puback_reason_code: None,
+                                pubcomp_reason_code: Some(PubcompPubrelCode::Success),
+                            })) {
+                                break;
+                            }
+                        }
+                    }
+                    // this is safe because the coordinator will never allow a None process to be processed
+                    if ctx.sender.process.unwrap().request(MqttPacket::Pubcomp(
+                        ConfirmationPacket {
+                            cmd: PacketType::Pubcomp,
+                            message_id: release.message_id,
+                            properties: None,
+                            puback_reason_code: None,
+                            pubcomp_reason_code: Some(PubcompPubrelCode::Success),
+                        },
+                    )) {
+                        if let Ok(duration) = ctx.started_at.elapsed() {
+                            metrics_process
+                                .send(metrics::DeliveryTime(2, duration.as_millis() as f64));
+                        }
+                        // send qos 2 because a pubcomp has now been sent to the subscriber
+                        coordinator.request(Cleanup(release.message_uuid, release.message_id, 2));
                     }
                 }
             }

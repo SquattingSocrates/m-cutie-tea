@@ -6,7 +6,7 @@ use crate::metrics::{self, MetricsProcess};
 use crate::persistence::{self, FileLog};
 use crate::structure::{
     Client, CompletionMessage, ConfirmationMessage, PublishContext, PublishJob, PublishMessage,
-    QueueMessage, Receiver, WriterRef,
+    QueueMessage, Receiver, ReleaseMessage, WriterRef,
 };
 use crate::topic_tree::TopicTree;
 use lunatic::{
@@ -55,25 +55,12 @@ impl CoordinatorProcess {
         );
         self.wal
             .append_confirmation(message_uuid, pubrel.clone(), SystemTime::now());
-        if !self.messages.is_released(message_id) {
-            println!(
+        println!(
                 "[Coordinator->Confirmation] Received PUBREL for {}. Marking message to be released {:?}",
                 message_id, self.messages
             );
-            self.messages.mark_to_be_released(message_id);
-            return true;
-        }
-        if self
-            .messages
-            .insert_completion_message(message_id, message_uuid)
-        {
-            println!(
-                "[Coordinator->Confirmation] Added PUBREL for {}. Releasing message {:?}",
-                message_id, self.messages
-            );
-            return true;
-        }
-        false
+        self.messages.mark_to_be_released(message_id, message_uuid);
+        true
     }
 
     pub fn handle_pubrec(
@@ -371,6 +358,7 @@ pub enum PollResponse {
     Publish(PublishJob, PublishContext),
     Confirmation(ConfirmationMessage, PublishContext),
     Complete(CompletionMessage, PublishContext),
+    Release(ReleaseMessage, PublishContext),
 }
 impl ProcessRequest<Poll> for CoordinatorProcess {
     type Response = PollResponse;
@@ -432,6 +420,71 @@ impl ProcessRequest<Release> for CoordinatorProcess {
         }
         println!("[Coordinator->Release] dropping message {}", id);
         state.messages.drop_messages_by_uuid(id);
+        true
+    }
+}
+
+/// Complete QoS 2 message flow by sending Pubcomp
+#[derive(Serialize, Deserialize)]
+pub struct Complete(
+    pub Uuid,
+    /// message_id of message with QoS > 0
+    pub u16,
+);
+impl ProcessRequest<Complete> for CoordinatorProcess {
+    type Response = bool;
+
+    fn handle(
+        state: &mut CoordinatorProcess,
+        Complete(message_uuid, message_id): Complete,
+    ) -> Self::Response {
+        println!(
+            "[Coordinator->Complete] Going to complete qos 2 message {:?} | {:?}",
+            message_uuid, message_id
+        );
+        if state
+            .messages
+            .insert_completion_message(message_id, message_uuid)
+        {
+            println!(
+                "[Coordinator->Complete] Added PUBCOMP for {}. Completing message flow {:?}",
+                message_id, state.messages
+            );
+            return true;
+        }
+        // state.wal.append_completion(message_uuid, SystemTime::now());
+        // println!("[Coordinator->Complete] dropping message {}", id);
+        // state.messages.drop_messages_by_uuid(id);
+        // true
+        false
+    }
+}
+
+/// Complete QoS 2 message flow
+#[derive(Serialize, Deserialize)]
+pub struct Cleanup(
+    pub Uuid,
+    /// message_id of message with QoS > 0
+    pub u16,
+    /// qos of message
+    pub u8,
+);
+impl ProcessRequest<Cleanup> for CoordinatorProcess {
+    type Response = bool;
+
+    fn handle(
+        state: &mut CoordinatorProcess,
+        Cleanup(message_uuid, message_id, qos): Cleanup,
+    ) -> Self::Response {
+        println!(
+            "[Coordinator->Cleanup] Going to complete qos 2 message {:?} | {:?}",
+            message_uuid, message_id
+        );
+        // state.wal.append_completion(message_uuid, SystemTime::now());
+        // println!("[Coordinator->Release] dropping message {}", id);
+        state
+            .messages
+            .cleanup_message(message_uuid, message_id, qos);
         true
     }
 }

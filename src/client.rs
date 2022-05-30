@@ -88,9 +88,11 @@ impl AbstractProcess for ClientProcess {
                                 }
                                 MqttPacket::Puback(packet)
                                 | MqttPacket::Pubrel(packet)
-                                | MqttPacket::Pubrec(packet)
-                                | MqttPacket::Pubcomp(packet) => {
+                                | MqttPacket::Pubrec(packet) => {
                                     coordinator.request(Confirm(packet, writer_ref.clone()));
+                                }
+                                MqttPacket::Pubcomp(packet) => {
+                                    println!("[Client {}] received pubcomp", writer_ref.client_id)
                                 }
                                 other => println!("Received other packet {:?}", other),
                             }
