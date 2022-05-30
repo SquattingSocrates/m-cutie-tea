@@ -1,9 +1,13 @@
 use std::collections::HashMap;
 
 use crate::client::ClientProcess;
+use crate::message_store::MessageStore;
 use crate::metrics::{self, MetricsProcess};
 use crate::persistence::{self, FileLog};
-use crate::structure::{ConfirmationMessage, PublishJob, PublishMessage, QueueMessage, WriterRef};
+use crate::structure::{
+    Client, CompletionMessage, ConfirmationMessage, PublishContext, PublishJob, PublishMessage,
+    QueueMessage, Receiver, WriterRef,
+};
 use crate::topic_tree::TopicTree;
 use lunatic::{
     host,
@@ -18,14 +22,6 @@ use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 use uuid::Uuid;
 
-// A reference to a client that joined the server.
-struct Client {
-    // username: String,
-    pub client: ProcessRef<ClientProcess>,
-    pub writer: WriterRef,
-    pub should_persist: bool,
-}
-
 /// The `CoordinatorSup` is supervising one global instance of the `CoordinatorProcess`.
 pub struct CoordinatorSup;
 impl Supervisor for CoordinatorSup {
@@ -39,93 +35,109 @@ impl Supervisor for CoordinatorSup {
 }
 
 pub struct CoordinatorProcess {
-    messages: Vec<QueueMessage>,
+    messages: MessageStore,
     clients: HashMap<String, Client>,
+    metrics: ProcessRef<MetricsProcess>,
     topic_tree: TopicTree,
     wal: FileLog,
-    waiting_qos1: HashMap<u16, bool>, // channels: HashMap<String, (ProcessRef<ChannelProcess>, usize)>,
-    metrics: ProcessRef<MetricsProcess>,
-    message_ids: HashMap<u16, Uuid>,
 }
 
 impl CoordinatorProcess {
-    pub fn drop_message_by_uuid(messages: &mut Vec<QueueMessage>, message_uuid: Uuid) {
-        messages.retain(|msg| match msg {
-            QueueMessage::Publish(p) => p.message_uuid != message_uuid,
-            QueueMessage::Confirmation(c) => c.message_uuid != message_uuid,
-        });
-    }
-
-    pub fn drop_message_uuid(&mut self, message_uuid: Uuid) {
-        CoordinatorProcess::drop_message_by_uuid(&mut self.messages, message_uuid)
-    }
-
-    pub fn drop_publish_message_id(&mut self, message_id: u16) {
-        self.messages.retain(|msg| {
-            if let QueueMessage::Publish(p) = msg {
-                return p.packet.message_id != Some(message_id);
-            }
-            true
-        });
-    }
-
-    // pub fn drop_publish_message_id(&mut self, message_id: u16) {
-    //     self.messages.retain(|msg| {
-    //         if let QueueMessage::Confirmation(p) = msg {
-    //             return p.packet.message_id != message_id;
-    //         }
-    //         true
-    //     });
-    // }
-
-    pub fn get_by_uuid(&self, message_uuid: Uuid) -> Option<&PublishMessage> {
-        CoordinatorProcess::get_message_by_uuid(&self.messages, message_uuid)
-    }
-
-    pub fn get_by_uuid_mut(&mut self, message_uuid: Uuid) -> Option<&mut PublishMessage> {
-        CoordinatorProcess::get_message_by_uuid_mut(&mut self.messages, message_uuid)
-    }
-
-    pub fn get_message_by_uuid(
-        messages: &[QueueMessage],
+    pub fn handle_pubrel(
+        &mut self,
+        pubrel: ConfirmationPacket,
+        message_id: u16,
         message_uuid: Uuid,
-    ) -> Option<&PublishMessage> {
-        for msg in messages.iter() {
-            if let QueueMessage::Publish(p) = msg {
-                if p.message_uuid == message_uuid {
-                    return Some(p);
-                }
-            }
+    ) -> bool {
+        println!(
+            "[Coordinator->Confirmation] Received PUBREL for {}. Releasing message {:?}",
+            message_uuid, pubrel
+        );
+        self.wal
+            .append_confirmation(message_uuid, pubrel.clone(), SystemTime::now());
+        if !self.messages.is_released(message_id) {
+            println!(
+                "[Coordinator->Confirmation] Received PUBREL for {}. Marking message to be released {:?}",
+                message_id, self.messages
+            );
+            self.messages.mark_to_be_released(message_id);
+            return true;
         }
-        None
+        if self
+            .messages
+            .insert_completion_message(message_id, message_uuid)
+        {
+            println!(
+                "[Coordinator->Confirmation] Added PUBREL for {}. Releasing message {:?}",
+                message_id, self.messages
+            );
+            return true;
+        }
+        false
     }
 
-    pub fn get_message_by_uuid_mut(
-        messages: &mut [QueueMessage],
+    pub fn handle_pubrec(
+        &mut self,
+        _: ConfirmationPacket,
+        message_id: u16,
         message_uuid: Uuid,
-    ) -> Option<&mut PublishMessage> {
-        for msg in messages.iter_mut() {
-            if let QueueMessage::Publish(p) = msg {
-                if p.message_uuid == message_uuid {
-                    return Some(p);
-                }
-            }
-        }
-        None
+        subscriber: WriterRef,
+    ) -> bool {
+        // when we receive a PUBREC we can delete the message on the broker side
+        self.wal.append_deletion(message_uuid, SystemTime::now());
+        self.messages
+            .delete_qos2_message(message_id, message_uuid, subscriber);
+        println!(
+                "[Coordinator->Confirmation] Received PUBREC from subscriber for {}. Deleting message {:?}",
+                message_id, self.messages
+            );
+        true
+    }
+
+    pub fn handle_pubcomp(
+        &mut self,
+        _: ConfirmationPacket,
+        message_id: u16,
+        message_uuid: Uuid,
+        subscriber: WriterRef,
+    ) -> bool {
+        // when we receive a PUBCOMP we can delete the message on the broker side
+        self.wal.append_completion(message_uuid, SystemTime::now());
+        // drop all remaining messages
+        self.messages.drop_messages_by_uuid(message_uuid);
+        println!(
+                "[Coordinator->Confirmation] Received PUBCOMP from subscriber for {}. Completing message {:?}",
+                message_id, self.messages
+            );
+        true
+    }
+
+    pub fn handle_puback(
+        &mut self,
+        puback: ConfirmationPacket,
+        message_id: u16,
+        message_uuid: Uuid,
+        subscriber: WriterRef,
+    ) -> bool {
+        // let queue = state.topic_tree.get_by_name(packet.message_id);
+        println!(
+            "[Coordinator->Confirmation] Received PUBACK for {}. Releasing message {:?}",
+            message_uuid, puback
+        );
+        self.wal
+            .append_confirmation(message_uuid, puback.clone(), SystemTime::now());
+        println!(
+            "[Coordinator->Confirmation] Wrote to WAL, getting sender {} {:?}",
+            message_uuid, self.messages
+        );
+
+        self.messages
+            .insert_confirmation_message(message_id, message_uuid, puback)
     }
 
     pub fn drop_inactive_subs(&mut self, queue_id: u128, inactive_subs: Vec<WriterRef>) {
         let queue = self.topic_tree.get_by_id(queue_id);
         queue.drop_inactive_subs(inactive_subs);
-    }
-
-    pub fn can_process_confirmation(
-        waiting_qos1: &HashMap<u16, bool>,
-        confirm: &mut ConfirmationMessage,
-    ) -> bool {
-        return !confirm.in_progress
-            && !waiting_qos1.contains_key(&confirm.message_id)
-            && confirm.send_to.process.is_some();
     }
 }
 
@@ -138,7 +150,8 @@ impl AbstractProcess for CoordinatorProcess {
         unsafe { host::api::process::die_when_link_dies(0) };
 
         let mut topic_tree = TopicTree::default();
-        let mut messages = Vec::new();
+        let mut message_queue = Vec::new();
+        let mut messages = HashMap::new();
         let mut message_ids = HashMap::new();
 
         let prev_state = FileLog::read_file("persistence", "backup.log").unwrap();
@@ -153,24 +166,26 @@ impl AbstractProcess for CoordinatorProcess {
                     let queue = topic_tree.get_by_name(publish.packet.topic.clone());
                     // save message to topic_tree
                     let client_id = publish.client_id;
-                    messages.push(QueueMessage::Publish(PublishMessage {
+                    message_queue.push(QueueMessage::Publish(PublishMessage {
                         message_uuid: publish.uuid,
-                        packet: publish.packet,
+                        message_id: publish.packet.message_id,
+                        // packet: publish.packet,
                         queue_id: queue.id,
                         in_progress: false,
                         sent: false,
-                        sender: WriterRef {
-                            client_id,
-                            process: None,
-                            session_id: publish.session.uuid,
-                            is_persistent_session: publish.session.is_persistent,
-                        },
-                        started_at: publish.received_at,
+                        // sender: WriterRef {
+                        //     client_id,
+                        //     process: None,
+                        //     session_id: publish.session.uuid,
+                        //     is_persistent_session: publish.session.is_persistent,
+                        // },
+                        // started_at: publish.received_at,
+                        // receivers: vec![],
                     }));
                 }
                 persistence::Entry::Accepted(acc) => {
                     if let Some(publish) =
-                        CoordinatorProcess::get_message_by_uuid_mut(&mut messages, acc.uuid)
+                        MessageStore::get_message_by_uuid_mut(&mut message_queue, acc.uuid)
                     {
                         // if qos 1 then we are done and can actually delete the message, but
                         // maybe still need to try and deliver the puback to the writer once
@@ -179,7 +194,7 @@ impl AbstractProcess for CoordinatorProcess {
                 }
                 persistence::Entry::Sent(entry) => {
                     if let Some(publish) =
-                        CoordinatorProcess::get_message_by_uuid_mut(&mut messages, entry.uuid)
+                        MessageStore::get_message_by_uuid_mut(&mut message_queue, entry.uuid)
                     {
                         // write to log and mark message as sent
                         publish.sent = true;
@@ -188,19 +203,17 @@ impl AbstractProcess for CoordinatorProcess {
                 persistence::Entry::Deleted(entry) => {}
                 persistence::Entry::Completed(complete) => {
                     // delete message from messages
-                    CoordinatorProcess::drop_message_by_uuid(&mut messages, complete.uuid);
+                    MessageStore::delete_messages_by_uuid(&mut message_queue, complete.uuid);
                 }
             }
         }
 
         CoordinatorProcess {
             topic_tree,
-            messages,
-            clients: HashMap::new(),
             wal: FileLog::new("persistence", "backup.log"),
-            waiting_qos1: HashMap::new(),
+            messages: MessageStore::new(messages, message_queue, message_ids),
+            clients: HashMap::new(),
             metrics: ProcessRef::<MetricsProcess>::lookup("metrics").unwrap(),
-            message_ids,
         }
     }
 }
@@ -230,13 +243,7 @@ impl ProcessRequest<Connect> for CoordinatorProcess {
         // update all messages to point to correct writer
         // after reconnect
         if !should_persist {}
-        for msg in state.messages.iter_mut() {
-            if let QueueMessage::Publish(publish) = msg {
-                if publish.sender.client_id == writer.client_id {
-                    publish.sender = writer.clone();
-                }
-            }
-        }
+        state.messages.update_message_publisher_refs(&writer);
         true
     }
 }
@@ -282,6 +289,7 @@ impl ProcessRequest<Subscribe> for CoordinatorProcess {
             );
         }
         // safe to unwrap because the process is always present
+        println!("Getting process {:?}", writer.process);
         writer.process.unwrap().request(MqttPacket::Suback(suback))
     }
 }
@@ -296,11 +304,8 @@ impl ProcessRequest<Publish> for CoordinatorProcess {
         state: &mut CoordinatorProcess,
         Publish(packet, writer, started_at): Publish,
     ) -> Self::Response {
-        let message_uuid = Uuid::new_v4();
+        let message_uuid = state.messages.register_message_id(packet.message_id);
         if packet.qos > 0 {
-            state
-                .message_ids
-                .insert(packet.message_id.unwrap(), message_uuid);
             state
                 .wal
                 .append_publish(message_uuid, packet.clone(), &writer, started_at);
@@ -310,69 +315,36 @@ impl ProcessRequest<Publish> for CoordinatorProcess {
             "[Coordinator->Publish] Adding publish message to message queue {} {:?}",
             packet.topic, queue
         );
-        state.messages.push(QueueMessage::Publish(PublishMessage {
-            message_uuid,
-            packet,
-            queue_id: queue.id,
-            in_progress: false,
-            sent: false,
-            sender: writer,
-            started_at,
-        }));
+        state
+            .messages
+            .insert_publish_message(message_uuid, packet, queue.id, writer, started_at);
         true
     }
 }
 
 /// ConfirmationPacket message
-impl ProcessRequest<ConfirmationPacket> for CoordinatorProcess {
+#[derive(Serialize, Deserialize)]
+pub struct Confirm(pub ConfirmationPacket, pub WriterRef);
+
+impl ProcessRequest<Confirm> for CoordinatorProcess {
     type Response = bool;
 
-    fn handle(state: &mut CoordinatorProcess, packet: ConfirmationPacket) -> Self::Response {
+    fn handle(
+        state: &mut CoordinatorProcess,
+        Confirm(packet, subscriber): Confirm,
+    ) -> Self::Response {
         // do qos 1 flow
         let message_id = packet.message_id;
-        let message_uuid = *state.message_ids.get(&message_id).unwrap();
+        let message_uuid = state.messages.lookup_uuid(message_id);
         if packet.cmd == PacketType::Puback {
-            // let queue = state.topic_tree.get_by_name(packet.message_id);
-            println!(
-                "[Coordinator->Confirmation] Received PUBACK for {}. Releasing message {:?}",
-                message_uuid, packet
-            );
-            state
-                .wal
-                .append_confirmation(message_uuid, packet.clone(), SystemTime::now());
-            println!(
-                "[Coordinator->Confirmation] Wrote to WAL, getting sender {} {:?}",
-                message_uuid, state.messages
-            );
-            let publish_message = state.get_by_uuid(message_uuid);
-            // handle case where multiple pubacks may be sent to broker
-            // but the message qos flow was already handled and the message
-            // has therefore been deleted
-            if let (None, PacketType::Puback) = (publish_message, packet.cmd) {
-                println!(
-                    "[Coordinator->Confirmation] Matching publish message for puback not found {}",
-                    message_id
-                );
-                return false;
-            }
-
-            // TODO: this will fail if message is qos 2 message and was not found
-            // it needs to be ensured that this doesn't happen
-            let publish_message = publish_message.unwrap();
-            state
-                .messages
-                .push(QueueMessage::Confirmation(ConfirmationMessage {
-                    message_id,
-                    packet,
-                    in_progress: false,
-                    send_to: publish_message.sender.clone(),
-                    started_at: publish_message.started_at,
-                    message_uuid,
-                }));
-            println!(
-                "[Coordinator->Confirmation] Added PUBACK for {}. Releasing message {:?}",
-                message_id, state.messages
-            );
+            return state.handle_puback(packet, message_id, message_uuid, subscriber);
+        } else if packet.cmd == PacketType::Pubrel {
+            // pubrel will never be sent by the subscriber, only the publisher
+            return state.handle_pubrel(packet, message_id, message_uuid);
+        } else if packet.cmd == PacketType::Pubrec {
+            return state.handle_pubrec(packet, message_id, message_uuid, subscriber);
+        } else if packet.cmd == PacketType::Pubcomp {
+            return state.handle_pubcomp(packet, message_id, message_uuid, subscriber);
         }
         // state.wal.append_confirmation(packet.clone());
         // let queue = state.topic_tree.get_by_name(packet.message_id);
@@ -380,7 +352,7 @@ impl ProcessRequest<ConfirmationPacket> for CoordinatorProcess {
         //     "[Coordinator->Confirmation] Dropping message {} {:?}",
         //     message_id, packet
         // );
-        state.drop_publish_message_id(message_id);
+        state.messages.drop_publish_message_id(message_id);
         println!(
             "[Coordinator->Confirmation] Dropped PUBLISH for {}. Releasing message {:?}",
             message_id, state.messages
@@ -396,44 +368,28 @@ pub struct Poll;
 #[derive(Serialize, Deserialize)]
 pub enum PollResponse {
     None,
-    Publish(PublishJob),
-    Confirmation(ConfirmationMessage),
+    Publish(PublishJob, PublishContext),
+    Confirmation(ConfirmationMessage, PublishContext),
+    Complete(CompletionMessage, PublishContext),
 }
 impl ProcessRequest<Poll> for CoordinatorProcess {
     type Response = PollResponse;
 
     fn handle(state: &mut CoordinatorProcess, _: Poll) -> Self::Response {
-        for msg in state.messages.iter_mut() {
-            match msg {
-                QueueMessage::Publish(publish) => {
-                    if !publish.in_progress && publish.sender.process.is_some() {
-                        let queue = state.topic_tree.get_by_id(publish.queue_id);
-                        if queue.subscribers.is_empty() {
-                            continue;
-                        }
-                        publish.in_progress = true;
-                        return PollResponse::Publish(PublishJob {
-                            message: publish.clone(),
-                            queue: queue.clone(),
-                        });
-                    }
-                }
-                QueueMessage::Confirmation(confirm) => {
-                    println!(
-                        "[Coordinator->Poll] Checking confirmation message {:?} | {:?}",
-                        confirm,
-                        state.waiting_qos1.contains_key(&confirm.message_id)
-                    );
-                    if CoordinatorProcess::can_process_confirmation(&state.waiting_qos1, confirm) {
-                        confirm.in_progress = true;
-                        // mark qos1 message as waiting to prevent sending puback multiple times
-                        state.waiting_qos1.insert(confirm.message_id, true);
-                        return PollResponse::Confirmation(confirm.clone());
-                    }
-                }
-            }
-        }
-        PollResponse::None
+        state.messages.poll(&mut state.topic_tree)
+        //     Some(QueueMessage::Publish(message)) => {
+        //         let queue_id = message.queue_id;
+        //         PollResponse::Publish(PublishJob {
+        //             message,
+        //             queue: state.topic_tree.get_by_id(queue_id).clone(),
+        //         })
+        //     }
+        //     Some(QueueMessage::Confirmation(confirmation)) => {
+        //         PollResponse::Confirmation(confirmation)
+        //     }
+        //     Some(QueueMessage::Complete(complete)) => PollResponse::Complete(complete),
+        //     None => PollResponse::None,
+        // }
     }
 }
 
@@ -445,25 +401,37 @@ pub struct Release(
     pub u8,
     /// message_id of message with QoS > 0
     pub Option<u16>,
+    /// vec of invalid subs that we have not been able to send messages to
     pub Vec<WriterRef>,
+    /// vec of receivers that will be used for session state tracking
+    /// as well as metrics
+    pub Vec<Receiver>,
 );
 impl ProcessRequest<Release> for CoordinatorProcess {
     type Response = bool;
 
     fn handle(
         state: &mut CoordinatorProcess,
-        Release(id, qos, message_id, inactive_subs): Release,
+        Release(id, qos, message_id, inactive_subs, receivers): Release,
     ) -> Self::Response {
+        println!(
+            "[Coordinator->Release] Going to release message {:?} | {:?} | qos: {}",
+            id, message_id, qos
+        );
         if qos == 1 {
             state.wal.append_deletion(id, SystemTime::now());
             state.wal.append_completion(id, SystemTime::now());
-            if let Some(publish) = state.get_by_uuid(id) {
-                state.drop_inactive_subs(publish.queue_id, inactive_subs);
-            }
-            state.waiting_qos1.remove(&message_id.unwrap());
+            // state.waiting_qos1.remove(&message_id.unwrap());
+        } else if qos == 2 {
+            // deletion of qos 2 message happens elsewhere
+            state.wal.append_completion(id, SystemTime::now());
+            // state.waiting_qos2.remove(&message_id.unwrap());
+        }
+        if let Some(queue_id) = state.messages.get_queue_id(id) {
+            state.drop_inactive_subs(queue_id, inactive_subs);
         }
         println!("[Coordinator->Release] dropping message {}", id);
-        state.drop_message_uuid(id);
+        state.messages.drop_messages_by_uuid(id);
         true
     }
 }
@@ -476,57 +444,55 @@ impl ProcessRequest<RetryLater> for CoordinatorProcess {
     type Response = bool;
 
     fn handle(state: &mut CoordinatorProcess, msg: RetryLater) -> Self::Response {
-        if let RetryLater::Publish(uuid, inactive_subs) = msg {
-            for msg in state.messages.iter_mut() {
-                match msg {
-                    QueueMessage::Publish(publish) => {
-                        if publish.message_uuid == uuid {
-                            publish.in_progress = false;
-                            let queue = state.topic_tree.get_by_id(publish.queue_id);
-                            queue.drop_inactive_subs(inactive_subs);
-                            return true;
-                        }
-                    }
-                    QueueMessage::Confirmation(confirm) => {
-                        // println!(
-                        //     "[Coordinator->Poll] Checking confirmation message {:?} | {:?}",
-                        //     confirm,
-                        //     state.waiting_qos1.contains_key(&confirm.message_id)
-                        // );
-                        // if !confirm.in_progress && !state.waiting_qos1.contains_key(&confirm.message_id)
-                        // {
-                        //     confirm.in_progress = true;
-                        //     // mark qos1 message as waiting to prevent sending puback multiple times
-                        //     state.waiting_qos1.insert(confirm.message_id, true);
-                        //     return PollResponse::Confirmation(confirm.clone());
-                        // }
-                    }
-                }
-            }
-        }
-        false
+        state
+            .messages
+            .retry_message_later(msg, &mut state.topic_tree)
     }
 }
 
 /// Mark Message sent from to client
 #[derive(Serialize, Deserialize)]
-pub struct Sent(pub Uuid, pub Vec<WriterRef>);
+pub struct Sent(
+    pub u16,
+    pub Uuid,
+    /// level of QoS
+    pub u8,
+    /// list of inactive subs
+    pub Vec<WriterRef>,
+    /// list of subs to which a message was sent
+    pub Vec<Receiver>,
+);
 impl ProcessRequest<Sent> for CoordinatorProcess {
     type Response = bool;
 
-    fn handle(state: &mut CoordinatorProcess, Sent(uuid, inactive_subs): Sent) -> Self::Response {
-        state.wal.append_sent(uuid, SystemTime::now());
-        if let Some(msg) = state.get_by_uuid_mut(uuid) {
-            let queue_id = msg.queue_id;
-            // write to log and mark message as sent
-            msg.sent = true;
+    fn handle(
+        state: &mut CoordinatorProcess,
+        Sent(message_id, message_uuid, qos, inactive_subs, receivers): Sent,
+    ) -> Self::Response {
+        state.wal.append_sent(message_uuid, SystemTime::now());
+
+        if let Some(queue_id) = state.messages.mark_sent(message_uuid, &receivers) {
             state.drop_inactive_subs(queue_id, inactive_subs);
-            return true;
+        } else {
+            eprintln!(
+                "[Coordinator->Sent] failed to get message that was sent {} | {:?}",
+                message_uuid, state.messages
+            );
+            return false;
         }
-        eprintln!(
-            "[Coordinator->Sent] failed to get message that was sent {} | {:?}",
-            uuid, state.messages
-        );
-        false
+        if qos == 2 {
+            state.messages.insert_confirmation_message(
+                message_id,
+                message_uuid,
+                ConfirmationPacket {
+                    cmd: PacketType::Pubrec,
+                    message_id,
+                    puback_reason_code: None,
+                    pubcomp_reason_code: None,
+                    properties: None,
+                },
+            );
+        }
+        true
     }
 }

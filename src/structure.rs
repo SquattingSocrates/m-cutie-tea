@@ -1,4 +1,4 @@
-use crate::client::WriterProcess;
+use crate::client::{ClientProcess, WriterProcess};
 use lunatic::process::ProcessRef;
 use mqtt_packet_3_5::{ConfirmationPacket, PublishPacket};
 use serde::{Deserialize, Serialize};
@@ -27,15 +27,25 @@ impl Queue {
 pub enum QueueMessage {
     Publish(PublishMessage),
     Confirmation(ConfirmationMessage),
+    Complete(CompletionMessage),
 }
 
+/// A PublishMessage is what we have in the queue
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PublishMessage {
     pub message_uuid: Uuid,
-    pub packet: PublishPacket,
+    pub message_id: Option<u16>,
     pub queue_id: u128,
     pub in_progress: bool,
     pub sent: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PublishContext {
+    pub packet: PublishPacket,
+    /// will be initialized to empty vec if none
+    /// and will contain all the subscribers to which a message was sent
+    pub receivers: Vec<Receiver>,
     pub sender: WriterRef,
     pub started_at: SystemTime,
 }
@@ -60,6 +70,41 @@ pub struct ConfirmationMessage {
     pub packet: ConfirmationPacket,
     pub message_id: u16,
     pub in_progress: bool,
-    pub send_to: WriterRef,
+    pub publisher: WriterRef,
+    pub receivers: Vec<Receiver>,
     pub started_at: SystemTime,
+    pub original_qos: u8,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CompletionMessage {
+    pub message_uuid: Uuid,
+    pub message_id: u16,
+    pub in_progress: bool,
+    pub publisher: WriterRef,
+    pub receiver: Receiver,
+    pub started_at: SystemTime,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Receiver {
+    pub writer: WriterRef,
+    pub received_qos: u8,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Qos2PublishContext {
+    pub publisher: WriterRef,
+    pub published_qos: u8,
+    pub received_qos: u8,
+    pub started_at: SystemTime,
+    pub receivers: Vec<Receiver>,
+}
+
+// A reference to a client that joined the server.
+pub struct Client {
+    // username: String,
+    pub client: ProcessRef<ClientProcess>,
+    pub writer: WriterRef,
+    pub should_persist: bool,
 }

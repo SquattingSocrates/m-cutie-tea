@@ -6,7 +6,7 @@ use std::io::Write;
 use std::time::SystemTime;
 use uuid::Uuid;
 
-use crate::coordinator::{self, CoordinatorProcess, Publish, Subscribe};
+use crate::coordinator::{self, Confirm, CoordinatorProcess, Publish, Subscribe};
 
 pub struct ClientProcess {
     this: ProcessRef<ClientProcess>,
@@ -86,8 +86,11 @@ impl AbstractProcess for ClientProcess {
                                         eprintln!("Failed to send pong");
                                     }
                                 }
-                                MqttPacket::Puback(packet) | MqttPacket::Pubrel(packet) => {
-                                    coordinator.request(packet);
+                                MqttPacket::Puback(packet)
+                                | MqttPacket::Pubrel(packet)
+                                | MqttPacket::Pubrec(packet)
+                                | MqttPacket::Pubcomp(packet) => {
+                                    coordinator.request(Confirm(packet, writer_ref.clone()));
                                 }
                                 other => println!("Received other packet {:?}", other),
                             }

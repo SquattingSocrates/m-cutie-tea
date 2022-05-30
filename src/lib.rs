@@ -5,6 +5,7 @@ pub mod coordinator;
 pub mod client;
 pub mod http_helper;
 // pub mod inspect;
+pub mod message_store;
 pub mod metrics;
 pub mod persistence;
 pub mod structure;
