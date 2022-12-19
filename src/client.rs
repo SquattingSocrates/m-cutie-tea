@@ -1,12 +1,13 @@
 use crate::structure::WriterRef;
-use lunatic::process::{AbstractProcess, ProcessRef, ProcessRequest, Request, StartProcess};
+use lunatic::process::{AbstractProcess, ProcessRef, Request, StartProcess};
+use lunatic::{abstract_process, Tag};
 use lunatic::{net::TcpStream, Mailbox, Process};
 use mqtt_packet_3_5::{ConnackPacket, ConnectPacket, MqttPacket, PacketDecoder};
 use std::io::Write;
 use std::time::SystemTime;
 use uuid::Uuid;
 
-use crate::coordinator::{self, Confirm, CoordinatorProcess, Publish, Subscribe};
+use crate::coordinator::{CoordinatorProcess, CoordinatorProcessHandler};
 
 pub struct ClientProcess {
     this: ProcessRef<ClientProcess>,
@@ -45,11 +46,11 @@ impl AbstractProcess for ClientProcess {
             session_id: Uuid::new_v4(),
             is_persistent_session: !connect_packet.clean_session,
         };
-        let _ = coordinator.request(coordinator::Connect(
+        let _ = coordinator.connect(
             this.clone(),
             writer_ref.clone(),
             connect_packet.clean_session,
-        ));
+        );
 
         Process::spawn_link(
             (
@@ -70,17 +71,13 @@ impl AbstractProcess for ClientProcess {
                             println!("Received packet {:?}", message);
                             match message {
                                 MqttPacket::Subscribe(sub) => {
-                                    coordinator.request(Subscribe(sub, writer_ref.clone()));
+                                    coordinator.subscribe(sub, writer_ref.clone());
                                 }
                                 MqttPacket::Publish(packet) => {
-                                    coordinator.request(Publish(
-                                        packet,
-                                        writer_ref.clone(),
-                                        started_at,
-                                    ));
+                                    coordinator.publish(packet, writer_ref.clone(), started_at);
                                 }
                                 MqttPacket::Pingreq => {
-                                    if writer.request(MqttPacket::Pingresp) {
+                                    if writer.write_packet(MqttPacket::Pingresp) {
                                         println!("Sent pong");
                                     } else {
                                         eprintln!("Failed to send pong");
@@ -89,7 +86,7 @@ impl AbstractProcess for ClientProcess {
                                 MqttPacket::Puback(packet)
                                 | MqttPacket::Pubrel(packet)
                                 | MqttPacket::Pubrec(packet) => {
-                                    coordinator.request(Confirm(packet, writer_ref.clone()));
+                                    coordinator.confirm(packet, writer_ref.clone());
                                 }
                                 MqttPacket::Pubcomp(packet) => {
                                     println!("[Client {}] received pubcomp", writer_ref.client_id)
@@ -107,7 +104,7 @@ impl AbstractProcess for ClientProcess {
         let is_v5 = connect_packet.protocol_version == 5;
 
         // send connack response to client
-        writer.request(MqttPacket::Connack(ConnackPacket {
+        writer.write_packet(MqttPacket::Connack(ConnackPacket {
             properties: None,
             reason_code: if is_v5 { Some(0) } else { None },
             return_code: if !is_v5 { Some(0) } else { None },
@@ -135,11 +132,10 @@ pub struct WriterProcess {
     is_v5: bool,
 }
 
-impl AbstractProcess for WriterProcess {
-    type Arg = (TcpStream, ConnectPacket);
-    type State = Self;
-
-    fn init(_: ProcessRef<Self>, (stream, connect_packet): Self::Arg) -> Self::State {
+#[abstract_process(visibility = pub)]
+impl WriterProcess {
+    #[init]
+    fn init(_: ProcessRef<Self>, (stream, connect_packet): (TcpStream, ConnectPacket)) -> Self {
         let client_id = connect_packet.client_id.clone();
         let is_v5 = connect_packet.protocol_version == 5;
         WriterProcess {
@@ -149,29 +145,35 @@ impl AbstractProcess for WriterProcess {
             client_id,
         }
     }
-}
 
-/// Write message
-impl ProcessRequest<MqttPacket> for WriterProcess {
-    type Response = bool;
+    #[terminate]
+    fn terminate(self) {
+        println!("Shutdown process");
+    }
 
-    fn handle(state: &mut WriterProcess, packet: MqttPacket) -> Self::Response {
+    #[handle_link_trapped]
+    fn handle_link_trapped(&self, tag: Tag) {
+        println!("Link trapped");
+    }
+
+    #[handle_request]
+    fn write_packet(&mut self, packet: MqttPacket) -> bool {
         println!(
             "[Writer {}] Received Mqtt Packet {:?}",
-            state.client_id, packet
+            self.client_id, packet
         );
-        match packet.encode(state.connect_packet.protocol_version) {
+        match packet.encode(self.connect_packet.protocol_version) {
             Err(encode_err) => {
                 eprintln!("Failed to encode packet {}", encode_err);
                 false
             }
             Ok(encoded) => {
-                println!("[Writer {}] Successfully encoded message", state.client_id);
-                if let Err(e) = state.stream.write_all(&encoded) {
+                println!("[Writer {}] Successfully encoded message", self.client_id);
+                if let Err(e) = self.stream.write_all(&encoded) {
                     eprintln!("Failed to write to stream {}", e);
                     return false;
                 }
-                println!("[Writer {}] Successfully wrote message", state.client_id);
+                println!("[Writer {}] Successfully wrote message", self.client_id);
                 true
             }
         }

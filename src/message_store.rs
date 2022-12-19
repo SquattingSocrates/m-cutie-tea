@@ -1,23 +1,12 @@
 use std::collections::HashMap;
 
 use crate::coordinator::{PollResponse, RetryLater};
-use crate::metrics::{self, MetricsProcess};
-use crate::persistence::{self, FileLog};
 use crate::structure::{
-    Client, CompletionMessage, ConfirmationMessage, PublishContext, PublishJob, PublishMessage,
+    CompletionMessage, ConfirmationMessage, PublishContext, PublishJob, PublishMessage,
     QueueMessage, Receiver, ReleaseMessage, WriterRef,
 };
 use crate::topic_tree::TopicTree;
-use lunatic::{
-    host,
-    process::{AbstractProcess, Message, ProcessMessage, ProcessRef, ProcessRequest, Request},
-    supervisor::Supervisor,
-};
-use mqtt_packet_3_5::{
-    ConfirmationPacket, Granted, MqttPacket, PacketType, PublishPacket, SubackPacket,
-    SubscribePacket,
-};
-use serde::{Deserialize, Serialize};
+use mqtt_packet_3_5::{ConfirmationPacket, PublishPacket};
 use std::time::SystemTime;
 use uuid::Uuid;
 

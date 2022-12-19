@@ -3,7 +3,7 @@
 pub mod coordinator;
 // pub mod session;
 pub mod client;
-pub mod http_helper;
+// pub mod metrics_server;
 // pub mod inspect;
 pub mod message_store;
 pub mod metrics;

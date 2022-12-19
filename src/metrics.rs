@@ -1,7 +1,8 @@
 use lunatic::{
-    host,
-    process::{AbstractProcess, ProcessMessage, ProcessRef, ProcessRequest},
+    abstract_process, host,
+    process::{AbstractProcess, ProcessRef},
     supervisor::Supervisor,
+    Process, Tag,
 };
 use prometheus::{Encoder, Histogram, HistogramOpts, IntCounter, IntGauge, Registry, TextEncoder};
 use serde::{Deserialize, Serialize};
@@ -28,11 +29,16 @@ pub struct MetricsProcess {
     qos2_delivery_time: Histogram,
 }
 
-impl AbstractProcess for MetricsProcess {
-    type Arg = ();
-    type State = Self;
+#[abstract_process(visibility = pub)]
+impl MetricsProcess {
+    /// function that retrieves the running metrics process
+    pub fn get_process() -> ProcessRef<MetricsProcess> {
+        let metrics_process = ProcessRef::<MetricsProcess>::lookup("metrics").unwrap();
+        metrics_process
+    }
 
-    fn init(_: ProcessRef<Self>, _: Self::Arg) -> Self::State {
+    #[init]
+    fn init(_: ProcessRef<Self>, _: ()) -> Self {
         // Coordinator shouldn't die when a client dies. This makes the link one-directional.
         unsafe { host::api::process::die_when_link_dies(0) };
 
@@ -80,29 +86,68 @@ impl AbstractProcess for MetricsProcess {
 
         res
     }
-}
 
-#[derive(Serialize, Deserialize)]
-pub struct Connect;
-impl ProcessMessage<Connect> for MetricsProcess {
-    fn handle(state: &mut Self::State, _: Connect) {
-        state.connected_clients.inc();
+    #[terminate]
+    fn terminate(self) {
+        println!("Shutdown process");
     }
-}
 
-#[derive(Serialize, Deserialize)]
-pub struct Disconnect;
-impl ProcessMessage<Disconnect> for MetricsProcess {
-    fn handle(state: &mut Self::State, _: Disconnect) {
-        state.connected_clients.dec();
+    #[handle_link_trapped]
+    fn handle_link_trapped(&self, tag: Tag) {
+        println!("Link trapped");
     }
-}
 
-#[derive(Serialize, Deserialize)]
-pub struct Packet;
-impl ProcessMessage<Packet> for MetricsProcess {
-    fn handle(state: &mut Self::State, _: Packet) {
-        state.received_packets.inc();
+    // =======================
+    // Message handlers
+    // =======================
+    #[handle_message]
+    pub fn track_connect(&mut self) {
+        self.connected_clients.inc();
+    }
+
+    #[handle_message]
+    pub fn track_disconnect(&mut self) {
+        self.connected_clients.dec();
+    }
+
+    #[handle_message]
+    pub fn track_packet(&mut self) {
+        self.received_packets.inc();
+    }
+
+    #[handle_message]
+    pub fn track_active_queue(&mut self, q: ActiveQueue) {
+        match q {
+            ActiveQueue::Create => self.active_queues.inc(),
+            ActiveQueue::Remove => self.active_queues.dec(),
+        }
+    }
+
+    #[handle_message]
+    pub fn track_delivery_time(&mut self, qos: u8, duration_ms: f64) {
+        match qos {
+            0 => self.qos0_delivery_time.observe(duration_ms),
+            1 => self.qos1_delivery_time.observe(duration_ms),
+            2 => self.qos2_delivery_time.observe(duration_ms),
+            _ => eprintln!(
+                "Received invalid qos value for metrics. QoS: {} | Duration(ms): {}",
+                qos, duration_ms
+            ),
+        }
+    }
+
+    // =======================
+    // Request handlers
+    // =======================
+    /// gather all metrics from the metrics process in prometheus format
+    #[handle_request]
+    pub fn gather(&self) -> Vec<u8> {
+        // Gather the metrics.
+        let mut buffer = vec![];
+        let encoder = TextEncoder::new();
+        let metric_families = self.registry.gather();
+        encoder.encode(&metric_families, &mut buffer).unwrap();
+        buffer
     }
 }
 
@@ -111,43 +156,6 @@ pub enum ActiveQueue {
     Create,
     Remove,
 }
-impl ProcessMessage<ActiveQueue> for MetricsProcess {
-    fn handle(state: &mut Self::State, q: ActiveQueue) {
-        match q {
-            ActiveQueue::Create => state.active_queues.inc(),
-            ActiveQueue::Remove => state.active_queues.dec(),
-        }
-    }
-}
-
 #[derive(Serialize, Deserialize)]
 /// Consists of QoS and delivery time in ms
 pub struct DeliveryTime(pub u8, pub f64);
-impl ProcessMessage<DeliveryTime> for MetricsProcess {
-    fn handle(state: &mut Self::State, DeliveryTime(qos, duration_ms): DeliveryTime) {
-        match qos {
-            0 => state.qos0_delivery_time.observe(duration_ms),
-            1 => state.qos1_delivery_time.observe(duration_ms),
-            2 => state.qos2_delivery_time.observe(duration_ms),
-            _ => eprintln!(
-                "Received invalid qos value for metrics. QoS: {} | Duration(ms): {}",
-                qos, duration_ms
-            ),
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct Gather;
-impl ProcessRequest<Gather> for MetricsProcess {
-    type Response = Vec<u8>;
-
-    fn handle(state: &mut Self::State, _: Gather) -> Vec<u8> {
-        // Gather the metrics.
-        let mut buffer = vec![];
-        let encoder = TextEncoder::new();
-        let metric_families = state.registry.gather();
-        encoder.encode(&metric_families, &mut buffer).unwrap();
-        buffer
-    }
-}

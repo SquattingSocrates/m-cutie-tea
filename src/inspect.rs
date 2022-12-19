@@ -33,7 +33,7 @@ impl AbstractProcess for InspectProcess {
         // Coordinator shouldn't die when a client dies. This makes the link one-directional.
         unsafe { host::api::process::die_when_link_dies(0) };
 
-        let metrics = ProcessRef::<MetricsProcess>::lookup("metrics").unwrap();
+        let metrics = MetricsProcess::get_process();
         // Process::spawn_link((metrics.clone(),), |(stream, metrics), _: Mailbox<()>| {
         //     loop {
         //         match http_reader.decode_packet() {
