@@ -2,15 +2,11 @@ use std::time::Duration;
 
 use crate::client::WriterProcessHandler;
 use crate::coordinator::{
-    Cleanup, CoordinatorProcess, CoordinatorProcessHandler, Poll, PollResponse, Release,
-    RetryLater, Sent,
+    Cleanup, CoordinatorProcess, CoordinatorProcessHandler, PollResponse, Release, RetryLater, Sent,
 };
-use crate::metrics::{self, MetricsProcess, MetricsProcessHandler};
+use crate::metrics::{MetricsProcess, MetricsProcessHandler};
 use crate::structure::{PublishContext, PublishJob, Receiver, WriterRef};
-use lunatic::{
-    process::{Message, ProcessRef, Request},
-    sleep, Mailbox, Process,
-};
+use lunatic::{process::ProcessRef, sleep, Mailbox, Process};
 use mqtt_packet_3_5::{ConfirmationPacket, MqttPacket, PacketType, PubcompPubrelCode};
 
 fn process_publish(
@@ -22,17 +18,19 @@ fn process_publish(
     let message_uuid = publish.message.message_uuid;
     let packet = ctx.packet;
     let message_qos = packet.qos;
-    println!(
+    lunatic_log::debug!(
         "[Worker->Publish] Received Publish {}, {:?}",
-        message_uuid, publish.queue
+        message_uuid,
+        publish.queue
     );
     let mut message_sent = false;
     let mut inactive_subs: Vec<WriterRef> = vec![];
     let mut sent_to: Vec<Receiver> = vec![];
     for sub in publish.queue.subscribers.iter() {
-        println!(
+        lunatic_log::debug!(
             "[Worker->Publish] Sending Publish to client {}, {:?}",
-            message_uuid, sub
+            message_uuid,
+            sub
         );
         // safe to unwrap because subscribers are required to pass a process with them
         let result = sub
@@ -56,14 +54,14 @@ fn process_publish(
         }
     }
     if !message_sent && packet.qos > 0 {
-        eprintln!("Failed to send message {:?} | {:?}", packet, publish.queue);
+        lunatic_log::error!("Failed to send message {:?} | {:?}", packet, publish.queue);
         // unlock message in coordinator because apparently there are not active
         // subscribers and a message with qos > 0 is required to be delivered
-        coordinator.retry_message_later(RetryLater::Publish(message_uuid, inactive_subs));
+        coordinator.retry_message_later(RetryLater(message_uuid, inactive_subs));
         sleep(Duration::from_millis(1000));
         return;
     }
-    println!("[Worker-Publish] Successfully sent message");
+    lunatic_log::debug!("[Worker-Publish] Successfully sent message");
     if let (Ok(duration), 0) = (ctx.started_at.elapsed(), packet.qos) {
         metrics_process.track_delivery_time(0, duration.as_millis() as f64);
     }
@@ -76,19 +74,20 @@ fn process_publish(
             inactive_subs.clone(),
             sent_to,
         ));
-        println!(
+        lunatic_log::debug!(
             "[Worker->Publish] Marked high QoS message as sent {:?} | Success: {}",
-            packet.message_id, was_sent
+            packet.message_id,
+            was_sent
         );
         return;
     }
     if coordinator.release_message(Release(message_uuid, 0, None, inactive_subs, sent_to)) {
-        println!(
+        lunatic_log::debug!(
             "[Worker->Publish] Successfully released message {}",
             message_uuid
         );
     } else {
-        eprintln!(
+        lunatic_log::error!(
             "[Worker->Publish] Failed to release message {}",
             message_uuid
         );
@@ -101,20 +100,18 @@ pub fn worker_process() {
         let coordinator = ProcessRef::<CoordinatorProcess>::lookup("coordinator").unwrap();
         let metrics_process = MetricsProcess::get_process();
         loop {
-            println!("Polling message from coordinator");
+            lunatic_log::debug!("Polling message from coordinator");
             match coordinator.poll_job() {
                 PollResponse::None => {
-                    // println!("Worker got none");
                     sleep(Duration::from_millis(1000));
                 }
                 PollResponse::Publish(publish, ctx) => {
                     process_publish(coordinator.clone(), metrics_process.clone(), publish, ctx);
                 }
-                PollResponse::Confirmation(confirm, ctx) => {
-                    println!("[Worker->Confirmation] received confirmation for message {} to process {:?}", confirm.message_id, confirm.packet);
+                PollResponse::Confirmation(confirm, _ctx) => {
+                    lunatic_log::debug!("[Worker->Confirmation] received confirmation for message {} to process {:?}", confirm.message_id, confirm.packet);
                     // this is safe because the coordinator will never allow a None confirmation to
                     // be processed by a worker
-                    let receiver = confirm.receivers.clone();
                     // wrap the packet correctly
                     let (qos, wrapped_packet) = if confirm.packet.cmd == PacketType::Puback {
                         (1, MqttPacket::Puback(confirm.packet))
@@ -142,10 +139,11 @@ pub fn worker_process() {
                         ));
                     }
                 }
-                PollResponse::Complete(complete, ctx) => {
-                    println!(
+                PollResponse::Complete(complete, _ctx) => {
+                    lunatic_log::debug!(
                         "[Worker->Complete] received completion for message {} to process {:?}",
-                        complete.message_id, complete.publisher
+                        complete.message_id,
+                        complete.publisher
                     );
                     // this is safe because the coordinator will never allow a None process to be processed
                     if complete
@@ -174,7 +172,7 @@ pub fn worker_process() {
                     }
                 }
                 PollResponse::Release(release, ctx) => {
-                    println!(
+                    lunatic_log::debug!(
                         "[Worker->Complete] received release(pubcomp) for message {} to process {:?}",
                         release.message_id, ctx.sender
                     );

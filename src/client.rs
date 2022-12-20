@@ -1,5 +1,5 @@
 use crate::structure::WriterRef;
-use lunatic::process::{AbstractProcess, ProcessRef, Request, StartProcess};
+use lunatic::process::{AbstractProcess, ProcessRef, StartProcess};
 use lunatic::{abstract_process, Tag};
 use lunatic::{net::TcpStream, Mailbox, Process};
 use mqtt_packet_3_5::{ConnackPacket, ConnectPacket, MqttPacket, PacketDecoder};
@@ -10,14 +10,14 @@ use uuid::Uuid;
 use crate::coordinator::{CoordinatorProcess, CoordinatorProcessHandler};
 
 pub struct ClientProcess {
-    this: ProcessRef<ClientProcess>,
-    coordinator: ProcessRef<CoordinatorProcess>,
-    writer: WriterRef,
-    connect_packet: ConnectPacket,
-    // pub reader: PacketDecoder<TcpStream>,
-    // protocol_version: u8,
-    is_v5: bool,
-    client_id: String,
+    // this: ProcessRef<ClientProcess>,
+    // coordinator: ProcessRef<CoordinatorProcess>,
+    // writer: WriterRef,
+    // connect_packet: ConnectPacket,
+    // // pub reader: PacketDecoder<TcpStream>,
+    // // protocol_version: u8,
+    // is_v5: bool,
+    // client_id: String,
 }
 
 impl AbstractProcess for ClientProcess {
@@ -33,7 +33,7 @@ impl AbstractProcess for ClientProcess {
         let connect_packet = match PacketDecoder::from_stream(stream.clone()).decode_packet(3) {
             Ok(MqttPacket::Connect(packet)) => packet,
             x => {
-                eprintln!("Unexpected value instead of connect_packet {:?}", x);
+                lunatic_log::error!("Unexpected value instead of connect_packet {:?}", x);
                 panic!("Invalid connect packet");
             }
         };
@@ -68,7 +68,7 @@ impl AbstractProcess for ClientProcess {
                 loop {
                     match reader.decode_packet(connect_packet.protocol_version) {
                         Ok(message) => {
-                            println!("Received packet {:?}", message);
+                            lunatic_log::debug!("Received packet {:?}", message);
                             match message {
                                 MqttPacket::Subscribe(sub) => {
                                     coordinator.subscribe(sub, writer_ref.clone());
@@ -78,9 +78,9 @@ impl AbstractProcess for ClientProcess {
                                 }
                                 MqttPacket::Pingreq => {
                                     if writer.write_packet(MqttPacket::Pingresp) {
-                                        println!("Sent pong");
+                                        lunatic_log::debug!("Sent pong");
                                     } else {
-                                        eprintln!("Failed to send pong");
+                                        lunatic_log::error!("Failed to send pong");
                                     }
                                 }
                                 MqttPacket::Puback(packet)
@@ -88,10 +88,13 @@ impl AbstractProcess for ClientProcess {
                                 | MqttPacket::Pubrec(packet) => {
                                     coordinator.confirm(packet, writer_ref.clone());
                                 }
-                                MqttPacket::Pubcomp(packet) => {
-                                    println!("[Client {}] received pubcomp", writer_ref.client_id)
+                                MqttPacket::Pubcomp(_packet) => {
+                                    lunatic_log::debug!(
+                                        "[Client {}] received pubcomp",
+                                        writer_ref.client_id
+                                    );
                                 }
-                                other => println!("Received other packet {:?}", other),
+                                other => lunatic_log::debug!("Received other packet {:?}", other),
                             }
                         }
                         Err(err) => panic!("A decoding error ocurred: {:?}", err),
@@ -100,7 +103,6 @@ impl AbstractProcess for ClientProcess {
             },
         );
 
-        let client_id = connect_packet.client_id.clone();
         let is_v5 = connect_packet.protocol_version == 5;
 
         // send connack response to client
@@ -112,12 +114,12 @@ impl AbstractProcess for ClientProcess {
         }));
 
         ClientProcess {
-            this,
-            coordinator,
-            writer: writer_ref,
-            connect_packet,
-            is_v5,
-            client_id,
+            // this,
+            // coordinator,
+            // writer: writer_ref,
+            // connect_packet,
+            // is_v5,
+            // client_id,
         }
     }
 }
@@ -129,7 +131,7 @@ pub struct WriterProcess {
     stream: TcpStream,
     connect_packet: ConnectPacket,
     client_id: String,
-    is_v5: bool,
+    // is_v5: bool,
 }
 
 #[abstract_process(visibility = pub)]
@@ -137,43 +139,45 @@ impl WriterProcess {
     #[init]
     fn init(_: ProcessRef<Self>, (stream, connect_packet): (TcpStream, ConnectPacket)) -> Self {
         let client_id = connect_packet.client_id.clone();
-        let is_v5 = connect_packet.protocol_version == 5;
+        // TODO: is_v5 will be needed for implementing v5 protocol
+        // let is_v5 = connect_packet.protocol_version == 5;
         WriterProcess {
             stream,
             connect_packet,
-            is_v5,
+            // is_v5,
             client_id,
         }
     }
 
     #[terminate]
     fn terminate(self) {
-        println!("Shutdown process");
+        lunatic_log::debug!("Shutdown process");
     }
 
     #[handle_link_trapped]
-    fn handle_link_trapped(&self, tag: Tag) {
-        println!("Link trapped");
+    fn handle_link_trapped(&self, _tag: Tag) {
+        lunatic_log::debug!("Link trapped");
     }
 
     #[handle_request]
     fn write_packet(&mut self, packet: MqttPacket) -> bool {
-        println!(
+        lunatic_log::debug!(
             "[Writer {}] Received Mqtt Packet {:?}",
-            self.client_id, packet
+            self.client_id,
+            packet
         );
         match packet.encode(self.connect_packet.protocol_version) {
             Err(encode_err) => {
-                eprintln!("Failed to encode packet {}", encode_err);
+                lunatic_log::error!("Failed to encode packet {}", encode_err);
                 false
             }
             Ok(encoded) => {
-                println!("[Writer {}] Successfully encoded message", self.client_id);
+                lunatic_log::debug!("[Writer {}] Successfully encoded message", self.client_id);
                 if let Err(e) = self.stream.write_all(&encoded) {
-                    eprintln!("Failed to write to stream {}", e);
+                    lunatic_log::error!("Failed to write to stream {}", e);
                     return false;
                 }
-                println!("[Writer {}] Successfully wrote message", self.client_id);
+                lunatic_log::info!("[Writer {}] Successfully wrote message", self.client_id);
                 true
             }
         }

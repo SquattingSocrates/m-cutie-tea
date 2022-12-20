@@ -8,17 +8,12 @@ version = "0.1.0"
 [dependencies]
 base64 = "0.13.0"
 lunatic = "^0.12"
+lunatic-log = "0.3.0"
 mqtt_packet_3_5 = {version = "0.2.2", features = ["serde_support"]}
 num = "0.4.0"
 prometheus = "0.13.0"
 queue-file = "1.1"
 ron = "0.7"
 serde = {version = "1.0.132", features = ["derive"]}
-# submillisecond = "0.2.0-alpha0"
+submillisecond = {version = "0.3.0", features = ["json", "logging", "cookies", "query"]}
 uuid = {version = "1.0.0", features = ["v4", "serde"]}
-
-[build]
-target = "wasm32-wasi"
-
-[target.wasm32-wasi]
-runner = "lunatic"

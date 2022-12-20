@@ -188,7 +188,7 @@ impl FileLog {
                 "[FileLog {:?}] couldn't write to file: {}",
                 self.full_path, why
             ),
-            Ok(_) => println!(
+            Ok(_) => lunatic_log::debug!(
                 "[FileLog {:?}] Successfully appended log to file",
                 self.full_path
             ),
@@ -199,7 +199,7 @@ impl FileLog {
         let full_path = Path::new(cwd).join(file_name);
         match File::open(&full_path) {
             Ok(file) => {
-                println!("[persistence] successfully opened file {:?}", full_path);
+                lunatic_log::debug!("[persistence] successfully opened file {:?}", full_path);
                 let mut res = Vec::with_capacity(200);
                 for entry in BufReader::new(file).lines().flatten() {
                     let bytes = entry.as_bytes();
@@ -238,9 +238,10 @@ impl FileLog {
                 Ok(res)
             }
             Err(e) => {
-                eprintln!(
+                lunatic_log::error!(
                     "[persistence] Failed to open file {:?} | {:?}",
-                    full_path, e
+                    full_path,
+                    e
                 );
                 Ok(vec![])
             }

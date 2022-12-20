@@ -1,10 +1,15 @@
-use crate::metrics::MetricsProcess;
-use submillisecond::{router, Application};
+extern crate submillisecond;
 
-fn gather_metrics() -> Vec<u8> {}
+use crate::metrics::{MetricsProcess, MetricsProcessHandler};
+use submillisecond::Application;
+
+fn gather_metrics() -> Vec<u8> {
+    let metrics_process = MetricsProcess::get_process();
+    metrics_process.gather()
+}
 
 pub fn start_server() {
-    Application::new(router! {
+    Application::new(submillisecond::router! {
         GET "/metrics" => gather_metrics
-    })
+    });
 }

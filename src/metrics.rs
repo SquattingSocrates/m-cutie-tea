@@ -1,9 +1,4 @@
-use lunatic::{
-    abstract_process, host,
-    process::{AbstractProcess, ProcessRef},
-    supervisor::Supervisor,
-    Process, Tag,
-};
+use lunatic::{abstract_process, host, process::ProcessRef, supervisor::Supervisor, Tag};
 use prometheus::{Encoder, Histogram, HistogramOpts, IntCounter, IntGauge, Registry, TextEncoder};
 use serde::{Deserialize, Serialize};
 
@@ -89,12 +84,12 @@ impl MetricsProcess {
 
     #[terminate]
     fn terminate(self) {
-        println!("Shutdown process");
+        lunatic_log::info!("Shutdown process");
     }
 
     #[handle_link_trapped]
-    fn handle_link_trapped(&self, tag: Tag) {
-        println!("Link trapped");
+    fn handle_link_trapped(&self, _tag: Tag) {
+        lunatic_log::error!("Link trapped");
     }
 
     // =======================
@@ -129,9 +124,10 @@ impl MetricsProcess {
             0 => self.qos0_delivery_time.observe(duration_ms),
             1 => self.qos1_delivery_time.observe(duration_ms),
             2 => self.qos2_delivery_time.observe(duration_ms),
-            _ => eprintln!(
+            _ => lunatic_log::error!(
                 "Received invalid qos value for metrics. QoS: {} | Duration(ms): {}",
-                qos, duration_ms
+                qos,
+                duration_ms
             ),
         }
     }

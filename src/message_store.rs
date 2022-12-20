@@ -103,7 +103,6 @@ impl MessageStore {
         // ) -> Option<(u8, u128, u16, SystemTime, WriterRef)> {
         if let Some(msg) = self.get_by_uuid_mut(message_uuid, receivers) {
             let queue_id = msg.queue_id;
-            let message_id = msg.message_id.unwrap();
             // write to log and mark message as sent
             // let publish_context = self.messages.get(&message_uuid).unwrap();
             msg.sent = true;
@@ -165,7 +164,7 @@ impl MessageStore {
         // // but the message qos flow was already handled and the message
         // // has therefore been deleted
         // if let None = publish_message {
-        //     println!(
+        //     lunatic_log::debug!(
         //         "[Coordinator->Confirmation] Matching publish message for confirmation not found {}",
         //         message_uuid
         //     );
@@ -190,7 +189,7 @@ impl MessageStore {
     ) -> Option<(SystemTime, WriterRef, &Receiver)> {
         // let publish_message = self.get_by_uuid(message_uuid);
         // if let None = publish_message {
-        //     println!(
+        //     lunatic_log::debug!(
         //         "[Coordinator->Confirmation] Matching publish message for confirmation not found {}",
         //         message_uuid
         //     );
@@ -240,9 +239,11 @@ impl MessageStore {
                     original_qos,
                     receivers: receivers.to_vec(),
                 }));
-            println!(
+            lunatic_log::debug!(
                 "[MessageStore] Added {:?} for {}. Releasing message {:?}",
-                cmd, message_id, self.message_queue
+                cmd,
+                message_id,
+                self.message_queue
             );
             return true;
         }
@@ -253,10 +254,10 @@ impl MessageStore {
         &mut self,
         message_id: u16,
         message_uuid: Uuid,
-        subscriber: WriterRef,
+        _subscriber: WriterRef,
     ) {
         self.drop_publish_message_id(message_id);
-        println!(
+        lunatic_log::debug!(
             "[MessageStore] Calling delete_qos2_message(pubrec) {:?}",
             message_uuid
         );
@@ -265,7 +266,7 @@ impl MessageStore {
 
     fn upsert_release_message(&mut self, message_id: u16, message_uuid: Uuid, is_pubrec: bool) {
         if let Some(msg) = self.qos2_message_release.get_mut(&message_uuid) {
-            println!(
+            lunatic_log::debug!(
                 "[MessageStore] Found matching release matching, needs updating. is_pubrec: {} | {:?}",
                 is_pubrec, msg,
             );
@@ -275,7 +276,7 @@ impl MessageStore {
             msg.pubrel_received = true;
             self.message_queue.push(QueueMessage::Release(msg.clone()));
         } else {
-            println!(
+            lunatic_log::debug!(
                 "[MessageStore] Creating new ReleaseMessage {:?}",
                 ReleaseMessage {
                     message_id,
@@ -298,7 +299,7 @@ impl MessageStore {
 
     /// mark message as to be released
     pub fn mark_to_be_released(&mut self, message_id: u16, message_uuid: Uuid) {
-        println!(
+        lunatic_log::debug!(
             "[MessageStore] Calling mark_to_be_released {}",
             message_uuid
         );
@@ -385,38 +386,41 @@ impl MessageStore {
         None
     }
 
-    pub fn retry_message_later(&mut self, msg: RetryLater, topic_tree: &mut TopicTree) -> bool {
-        if let RetryLater::Publish(uuid, inactive_subs) = msg {
-            for msg in self.message_queue.iter_mut() {
-                match msg {
-                    QueueMessage::Publish(publish) => {
-                        if publish.message_uuid == uuid {
-                            publish.in_progress = false;
-                            let queue = topic_tree.get_by_id(publish.queue_id);
-                            queue.drop_inactive_subs(inactive_subs);
-                            return true;
-                        }
+    pub fn retry_message_later(
+        &mut self,
+        RetryLater(uuid, inactive_subs): RetryLater,
+        topic_tree: &mut TopicTree,
+    ) -> bool {
+        for msg in self.message_queue.iter_mut() {
+            match msg {
+                QueueMessage::Publish(publish) => {
+                    if publish.message_uuid == uuid {
+                        publish.in_progress = false;
+                        let queue = topic_tree.get_by_id(publish.queue_id);
+                        queue.drop_inactive_subs(inactive_subs);
+                        return true;
                     }
-                    QueueMessage::Confirmation(confirm) => {
-                        // println!(
-                        //     "[Coordinator->Poll] Checking confirmation message {:?} | {:?}",
-                        //     confirm,
-                        //     state.waiting_qos1.contains_key(&confirm.message_id)
-                        // );
-                        // if !confirm.in_progress && !state.waiting_qos1.contains_key(&confirm.message_id)
-                        // {
-                        //     confirm.in_progress = true;
-                        //     // mark qos1 message as waiting to prevent sending puback multiple times
-                        //     state.waiting_qos1.insert(confirm.message_id, true);
-                        //     return PollResponse::Confirmation(confirm.clone());
-                        // }
-                    }
-                    // TODO: handle state of messages if complete and release have been encountered
-                    QueueMessage::Complete(_) => {}
-                    QueueMessage::Release(_) => {}
                 }
+                QueueMessage::Confirmation(confirm) => {
+                    lunatic_log::debug!(
+                        "[Coordinator->Poll] Checking confirmation message {:?} | {:?}",
+                        confirm,
+                        self.waiting_qos1.contains_key(&confirm.message_id)
+                    );
+                    // if !confirm.in_progress && !self.waiting_qos1.contains_key(&confirm.message_id)
+                    // {
+                    //     confirm.in_progress = true;
+                    //     // mark qos1 message as waiting to prevent sending puback multiple times
+                    //     self.waiting_qos1.insert(confirm.message_id, true);
+                    //     return PollResponse::Confirmation(confirm.clone());
+                    // }
+                }
+                // TODO: handle state of messages if complete and release have been encountered
+                QueueMessage::Complete(_) => {}
+                QueueMessage::Release(_) => {}
             }
         }
+
         true
     }
 
@@ -452,7 +456,7 @@ impl MessageStore {
                     }
                 }
                 QueueMessage::Confirmation(confirm) => {
-                    println!(
+                    lunatic_log::debug!(
                         "[Coordinator->Poll] Checking confirmation message {:?} | {:?}",
                         confirm,
                         self.waiting_qos1.contains_key(&confirm.message_id)
@@ -473,7 +477,7 @@ impl MessageStore {
                     }
                 }
                 QueueMessage::Complete(complete) => {
-                    println!(
+                    lunatic_log::debug!(
                         "[Coordinator->Poll] Checking Complete message {:?} | {:?}",
                         complete.message_id,
                         self.waiting_qos2.contains_key(&complete.message_id)
@@ -489,7 +493,7 @@ impl MessageStore {
                     }
                 }
                 QueueMessage::Release(release) => {
-                    println!(
+                    lunatic_log::debug!(
                         "[Coordinator->Poll] Checking Release message {:?} | {:?}",
                         release,
                         self.waiting_release_qos2.contains_key(&release.message_id)

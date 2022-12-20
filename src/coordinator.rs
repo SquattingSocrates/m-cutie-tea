@@ -46,13 +46,14 @@ impl CoordinatorProcess {
         message_id: u16,
         message_uuid: Uuid,
     ) -> bool {
-        println!(
+        lunatic_log::debug!(
             "[Coordinator->Confirmation] Received PUBREL for {}. Releasing message {:?}",
-            message_uuid, pubrel
+            message_uuid,
+            pubrel
         );
         self.wal
             .append_confirmation(message_uuid, pubrel.clone(), SystemTime::now());
-        println!(
+        lunatic_log::debug!(
                 "[Coordinator->Confirmation] Received PUBREL for {}. Marking message to be released {:?}",
                 message_id, self.messages
             );
@@ -71,7 +72,7 @@ impl CoordinatorProcess {
         self.wal.append_deletion(message_uuid, SystemTime::now());
         self.messages
             .delete_qos2_message(message_id, message_uuid, subscriber);
-        println!(
+        lunatic_log::debug!(
                 "[Coordinator->Confirmation] Received PUBREC from subscriber for {}. Deleting message {:?}",
                 message_id, self.messages
             );
@@ -83,13 +84,13 @@ impl CoordinatorProcess {
         _: ConfirmationPacket,
         message_id: u16,
         message_uuid: Uuid,
-        subscriber: WriterRef,
+        _subscriber: WriterRef,
     ) -> bool {
         // when we receive a PUBCOMP we can delete the message on the broker side
         self.wal.append_completion(message_uuid, SystemTime::now());
         // drop all remaining messages
         self.messages.drop_messages_by_uuid(message_uuid);
-        println!(
+        lunatic_log::debug!(
                 "[Coordinator->Confirmation] Received PUBCOMP from subscriber for {}. Completing message {:?}",
                 message_id, self.messages
             );
@@ -101,18 +102,20 @@ impl CoordinatorProcess {
         puback: ConfirmationPacket,
         message_id: u16,
         message_uuid: Uuid,
-        subscriber: WriterRef,
+        _subscriber: WriterRef,
     ) -> bool {
         // let queue = self.topic_tree.get_by_name(packet.message_id);
-        println!(
+        lunatic_log::debug!(
             "[Coordinator->Confirmation] Received PUBACK for {}. Releasing message {:?}",
-            message_uuid, puback
+            message_uuid,
+            puback
         );
         self.wal
             .append_confirmation(message_uuid, puback.clone(), SystemTime::now());
-        println!(
+        lunatic_log::debug!(
             "[Coordinator->Confirmation] Wrote to WAL, getting sender {} {:?}",
-            message_uuid, self.messages
+            message_uuid,
+            self.messages
         );
 
         self.messages
@@ -134,11 +137,11 @@ impl CoordinatorProcess {
 
         let mut topic_tree = TopicTree::default();
         let mut message_queue = Vec::new();
-        let mut messages = HashMap::new();
+        let messages = HashMap::new();
         let mut message_ids = HashMap::new();
 
         let prev_state = FileLog::read_file("persistence", "backup.log").unwrap();
-        println!("[Coordinator] read prev_state {:?}", prev_state);
+        lunatic_log::debug!("[Coordinator] read prev_state {:?}", prev_state);
 
         for e in prev_state {
             match e {
@@ -148,7 +151,6 @@ impl CoordinatorProcess {
                     // ensure queue
                     let queue = topic_tree.get_by_name(publish.packet.topic.clone());
                     // save message to topic_tree
-                    let client_id = publish.client_id;
                     message_queue.push(QueueMessage::Publish(PublishMessage {
                         message_uuid: publish.uuid,
                         message_id: publish.packet.message_id,
@@ -167,7 +169,7 @@ impl CoordinatorProcess {
                     }));
                 }
                 persistence::Entry::Accepted(acc) => {
-                    if let Some(publish) =
+                    if let Some(_publish) =
                         MessageStore::get_message_by_uuid_mut(&mut message_queue, acc.uuid)
                     {
                         // if qos 1 then we are done and can actually delete the message, but
@@ -183,7 +185,7 @@ impl CoordinatorProcess {
                         publish.sent = true;
                     }
                 }
-                persistence::Entry::Deleted(entry) => {}
+                persistence::Entry::Deleted(_entry) => {}
                 persistence::Entry::Completed(complete) => {
                     // delete message from messages
                     MessageStore::delete_messages_by_uuid(&mut message_queue, complete.uuid);
@@ -235,9 +237,10 @@ impl CoordinatorProcess {
 
     #[handle_request]
     fn subscribe(&mut self, packet: SubscribePacket, writer: WriterRef) -> bool {
-        println!(
+        lunatic_log::debug!(
             "[Coordinator->Subscribe] Received Subscribe message {:?} {:?}",
-            writer, packet
+            writer,
+            packet
         );
         let mut suback = SubackPacket {
             granted: vec![],
@@ -249,13 +252,13 @@ impl CoordinatorProcess {
         for sub in packet.subscriptions {
             self.topic_tree.add_subscriptions(sub.topic, writer.clone());
             suback.granted.push(Granted::QoS2);
-            println!(
+            lunatic_log::debug!(
                 "[Coordinator->Subscribe] Got these matching queues {:?}",
                 self.topic_tree
             );
         }
         // safe to unwrap because the process is always present
-        println!("Getting process {:?}", writer.process);
+        lunatic_log::debug!("Getting process {:?}", writer.process);
         writer
             .process
             .unwrap()
@@ -275,9 +278,10 @@ impl CoordinatorProcess {
                 .append_publish(message_uuid, packet.clone(), &writer, started_at);
         }
         let queue = self.topic_tree.get_by_name(packet.topic.clone());
-        println!(
+        lunatic_log::debug!(
             "[Coordinator->Publish] Adding publish message to message queue {} {:?}",
-            packet.topic, queue
+            packet.topic,
+            queue
         );
         self.messages
             .insert_publish_message(message_uuid, packet, queue.id, writer, started_at);
@@ -301,14 +305,15 @@ impl CoordinatorProcess {
         }
         // self.wal.append_confirmation(packet.clone());
         // let queue = self.topic_tree.get_by_name(packet.message_id);
-        // println!(
+        // lunatic_log::debug!(
         //     "[Coordinator->Confirmation] Dropping message {} {:?}",
         //     message_id, packet
         // );
         self.messages.drop_publish_message_id(message_id);
-        println!(
+        lunatic_log::debug!(
             "[Coordinator->Confirmation] Dropped PUBLISH for {}. Releasing message {:?}",
-            message_id, self.messages
+            message_id,
+            self.messages
         );
         true
     }
@@ -321,11 +326,13 @@ impl CoordinatorProcess {
     #[handle_request]
     fn release_message(
         &mut self,
-        Release(id, qos, message_id, inactive_subs, receivers): Release,
+        Release(id, qos, message_id, inactive_subs, ..): Release,
     ) -> bool {
-        println!(
+        lunatic_log::debug!(
             "[Coordinator->Release] Going to release message {:?} | {:?} | qos: {}",
-            id, message_id, qos
+            id,
+            message_id,
+            qos
         );
         if qos == 1 {
             self.wal.append_deletion(id, SystemTime::now());
@@ -339,29 +346,31 @@ impl CoordinatorProcess {
         if let Some(queue_id) = self.messages.get_queue_id(id) {
             self.drop_inactive_subs(queue_id, inactive_subs);
         }
-        println!("[Coordinator->Release] dropping message {}", id);
+        lunatic_log::debug!("[Coordinator->Release] dropping message {}", id);
         self.messages.drop_messages_by_uuid(id);
         true
     }
 
     #[handle_request]
     fn complete_message(&mut self, Complete(message_uuid, message_id): Complete) -> bool {
-        println!(
+        lunatic_log::debug!(
             "[Coordinator->Complete] Going to complete qos 2 message {:?} | {:?}",
-            message_uuid, message_id
+            message_uuid,
+            message_id
         );
         if self
             .messages
             .insert_completion_message(message_id, message_uuid)
         {
-            println!(
+            lunatic_log::debug!(
                 "[Coordinator->Complete] Added PUBCOMP for {}. Completing message flow {:?}",
-                message_id, self.messages
+                message_id,
+                self.messages
             );
             return true;
         }
         // self.wal.append_completion(message_uuid, SystemTime::now());
-        // println!("[Coordinator->Complete] dropping message {}", id);
+        // lunatic_log::debug!("[Coordinator->Complete] dropping message {}", id);
         // self.messages.drop_messages_by_uuid(id);
         // true
         false
@@ -369,12 +378,13 @@ impl CoordinatorProcess {
 
     #[handle_request]
     fn cleanup(&mut self, Cleanup(message_uuid, message_id, qos): Cleanup) -> bool {
-        println!(
+        lunatic_log::debug!(
             "[Coordinator->Cleanup] Going to complete qos 2 message {:?} | {:?}",
-            message_uuid, message_id
+            message_uuid,
+            message_id
         );
         // self.wal.append_completion(message_uuid, SystemTime::now());
-        // println!("[Coordinator->Release] dropping message {}", id);
+        // lunatic_log::debug!("[Coordinator->Release] dropping message {}", id);
         self.messages.cleanup_message(message_uuid, message_id, qos);
         true
     }
@@ -394,9 +404,10 @@ impl CoordinatorProcess {
         if let Some(queue_id) = self.messages.mark_sent(message_uuid, &receivers) {
             self.drop_inactive_subs(queue_id, inactive_subs);
         } else {
-            eprintln!(
+            lunatic_log::error!(
                 "[Coordinator->Sent] failed to get message that was sent {} | {:?}",
-                message_uuid, self.messages
+                message_uuid,
+                self.messages
             );
             return false;
         }
@@ -464,9 +475,7 @@ pub struct Cleanup(
 );
 
 #[derive(Serialize, Deserialize)]
-pub enum RetryLater {
-    Publish(Uuid, Vec<WriterRef>),
-}
+pub struct RetryLater(pub Uuid, pub Vec<WriterRef>);
 
 /// Mark Message sent from to client
 #[derive(Serialize, Deserialize)]

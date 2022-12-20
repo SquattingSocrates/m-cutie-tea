@@ -239,16 +239,20 @@ impl State {
                 (_, _, _) => return false,
             };
             if state == State::Terminal {
-                println!(
+                lunatic_log::debug!(
                     "\n\nMATCHING TOPIC to wildcard: {} | {} | {:?}",
-                    wildcard, topic, state
+                    wildcard,
+                    topic,
+                    state
                 );
                 return true;
             }
         }
-        println!(
+        lunatic_log::debug!(
             "\n\nMATCHING TOPIC to wildcard: {} | {} | {:?}",
-            wildcard, topic, false
+            wildcard,
+            topic,
+            false
         );
         false
     }
@@ -271,13 +275,13 @@ impl TopicTree {
     }
 
     pub fn get_by_name(&mut self, topic: String) -> Queue {
-        println!("[TopicTree] getting by topic {}", topic);
+        lunatic_log::debug!("[TopicTree] getting by topic {}", topic);
         self.ensure_topic_queue(&topic);
         self.queues.get(&topic).unwrap().clone()
     }
 
     pub fn get_by_id(&mut self, queue_id: u128) -> &mut Queue {
-        println!("[TopicTree] getting by id {}", queue_id);
+        lunatic_log::debug!("[TopicTree] getting by id {}", queue_id);
         self.queues.values_mut().find(|q| q.id == queue_id).unwrap()
     }
 
